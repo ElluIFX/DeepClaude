@@ -15,21 +15,19 @@ from app.clients import (
 )
 from app.utils.logger import logger
 
-WEB_SEARCH_CHECK_PROMPT = """
-Your task: determine if the latest conversation requires a web search, based on the conversation's background and context.
-Consider the following:
-1) Current information such as news, events or current affairs
-2) Technical or professional data to be validated
-3) Recent developments in technology, science or any field
-4) Statistical data or factual information that may need to be updated
-5) Complex themes that benefit from multiple sources
-6) Regional or cultural information that may vary by location or time of day
-7) New internet slang, viral content or MEME.
-If the query contains the above elements, please confirm the Google search keywords needed for the query and output them, the output can only include the keywords, don't output any other content, the keywords are separated by spaces.
-Please respond "NO" if the query is common sense, or involves role-playing, fictional scenarios, or ongoing storylines, or if the information is established static information, or if the user is engaging in casual conversation, or if the context is explicitly fictional/unrelated to real-world data. Please do not output any other content.
-Note: If a user is requesting up-to-date information, please use "up-to-date" directly as a search term: your knowledge base ends in 2023, but the current time has changed and you don't know the latest time, so you can't assume the current time.
-Note: The language used for keywords should match the content and context of the requested query. If the query language is specified in the dialog, then you should use the language specified in the dialog to write the keywords. If not specified, then according to the dialog statement to determine: If the dialog is in Chinese, please give Chinese keywords. if the user is using English, then you should give English keywords.
-Emphasize: your output includes only two cases: keywords separated by spaces, or "NO".
+WEB_SEARCH_CHECK_PROMPT = """You are a large-model online search assistance engine, and your task is to determine whether the user's latest news warrants a web search based on the context of the current conversation, in order to supplement the latest information that is missing from the large-model fixed knowledge base.
+- If you think the user's latest command requires an online search, analyze the user's command and output what you think are reasonable Google search terms in the following format:
+``
+keyword1 keyword2 ... keywordB keywordB ...
+``
+- Each keyword search needs to be separated by spaces, you can use Google Engine's search syntax to specify the search target more precisely (e.g. "-" excludes unwanted keywords).
+- Multiple search requests for keywords need to be separated by a semicolon, e.g. the above example will create two search requests, respectively (search: keyword1 keyword2 ...) and (search: keywordA keywordB ...) .
+- For single searches, it directly returns something like `keywords1 keywords2 keywords3 ...', without the semicolon. `, without the semicolon
+-The number of keywords per search request should be 3 to 6, and single keywords can be used for requests with strong pointers such as names of people and places.
+- - You need to determine the complexity of the search, for simple questions try to use only 1 request, while for complex questions (e.g. multi-language integrated searches, multi-subject topics, etc.) you can create 2-4 search requests, not more than 5 at most.
+- And if you don't think the user's latest command requires searching online content, just output "NO".
+- If the content of the user's command specifies that an online search is required, summarize the keywords according to the user's command even if you don't think you need to invoke a search
+- Note: You can only output the keyword sequence, or "NO", you don't need to add any explanations!
 """
 
 
@@ -44,7 +42,6 @@ class DeepClaude:
         claude_api_url: str,
         claude_provider: str,
         is_origin_reasoning: bool,
-        enable_web_search: bool,
         web_search_token: str,
         web_search_max_results: int,
         web_search_crawl_results: int,
@@ -69,15 +66,11 @@ class DeepClaude:
         else:
             raise ValueError(f"不支持的 Claude Provider: {claude_provider}")
         self.is_origin_reasoning = is_origin_reasoning
-        self.enable_web_search = enable_web_search
         self.web_search_token = web_search_token
         self.web_search_max_results = web_search_max_results
         self.web_search_crawl_results = web_search_crawl_results
         self.web_search_model = web_search_model
-        if enable_web_search:
-            self.web_search_client = OpenAIClient(
-                web_search_api_key, web_search_api_url
-            )
+        self.web_search_client = OpenAIClient(web_search_api_key, web_search_api_url)
 
     async def chat_completions_with_stream(
         self,
@@ -85,6 +78,7 @@ class DeepClaude:
         model_arg: dict,
         deepseek_model: str = "deepseek-reasoner",
         claude_model: str = "claude-3-5-sonnet-20241022",
+        enable_web_search: bool = False,
     ) -> AsyncGenerator[bytes, None]:
         """处理完整的流式输出过程
 
@@ -119,10 +113,15 @@ class DeepClaude:
         output_queue = asyncio.Queue()
         # 队列，用于传递 DeepSeek 推理内容给 Claude
         claude_queue = asyncio.Queue()
+        # 队列，用于传递网络搜索结果给 Claude 和 DeepSeek
+        web_search_queue_1 = asyncio.Queue()
+        web_search_queue_2 = asyncio.Queue()
 
         # 用于存储 DeepSeek 的推理累积内容
         reasoning_content = []
-        if self.enable_web_search:
+
+        async def process_web_search(messages: list):
+            web_search_content = []
             # 检查是否需要进行网络搜索
             web_search_check_prompt = WEB_SEARCH_CHECK_PROMPT
             web_search_messages = [
@@ -135,7 +134,8 @@ class DeepClaude:
             logger.info(
                 f"开始检查是否需要进行网络搜索, 使用模型: {self.web_search_model}, 提供商: OpenAI"
             )
-            web_search_keys = ""
+            web_search_keys = []
+            ret_content = ""
             async for content_type, content in self.web_search_client.stream_chat(
                 messages=web_search_messages,
                 model=self.web_search_model,
@@ -148,44 +148,115 @@ class DeepClaude:
                 },
             ):
                 if content_type == "answer":
-                    web_search_keys += content
-            web_search_keys = web_search_keys.strip()
+                    ret_content += content
+            web_search_keys = ret_content.strip()
             logger.info(f"检查模型返回: {web_search_keys}")
 
-            web_search_result = ""
             if web_search_keys.lower() == "no":
                 logger.info("不需要进行网络搜索")
             else:
-                logger.info(f"发起网络搜索，关键词: {web_search_keys}")
-                try:
-                    async with aiohttp.ClientSession() as session:
-                        async with session.post(
-                            url="https://api.search1api.com/search",
-                            headers={
-                                "Authorization": f"Bearer {self.web_search_token}",
-                                "Content-Type": "application/json",
+                info = "**Web Searching...**\n\n"
+                for key in web_search_keys.split(";"):
+                    info += f"- {key}\n"
+                response = {
+                    "id": chat_id,
+                    "object": "chat.completion.chunk",
+                    "created": created_time,
+                    "model": deepseek_model,
+                    "choices": [
+                        {
+                            "index": 0,
+                            "delta": {
+                                "role": "assistant",
+                                "reasoning_content": info + "\n\n",
+                                "content": "",
                             },
-                            json={
-                                "query": web_search_keys,
-                                "search_service": "google",
-                                "max_results": self.web_search_max_results,
-                                "crawl_results": self.web_search_crawl_results,
-                                "image": False,
+                        }
+                    ],
+                }
+                await output_queue.put(
+                    f"data: {json.dumps(response)}\n\n".encode("utf-8")
+                )
+                web_search_keys = web_search_keys.split(";")
+                MAX_CONCURRENT_SEARCHES = 8
+
+                async def perform_search(search_key):
+                    try:
+                        logger.info(f"发起网络搜索，关键词: {search_key}")
+                        async with aiohttp.ClientSession() as session:
+                            async with session.post(
+                                url="https://api.search1api.com/search",
+                                headers={
+                                    "Authorization": f"Bearer {self.web_search_token}",
+                                    "Content-Type": "application/json",
+                                },
+                                json={
+                                    "query": search_key,
+                                    "search_service": "google",
+                                    "max_results": self.web_search_max_results,
+                                    "crawl_results": self.web_search_crawl_results,
+                                    "image": False,
+                                },
+                            ) as response:
+                                result = await response.text()
+                                logger.debug(
+                                    f"网络搜索 返回值: {result}，状态码: {response.status}"
+                                )
+                                if response.status != 200:
+                                    logger.error(
+                                        f"网络搜索失败，状态码: {response.status}"
+                                    )
+                                    return None
+                                else:
+                                    logger.info(
+                                        f"网络搜索完成，返回长度: {len(result)}"
+                                    )
+                                    return result
+                    except Exception as e:
+                        logger.error(f"网络搜索失败: {e}")
+                        return None
+
+                # 使用 asyncio.Semaphore 限制并发数
+                semaphore = asyncio.Semaphore(MAX_CONCURRENT_SEARCHES)
+
+                async def bounded_search(search_key):
+                    async with semaphore:
+                        return await perform_search(search_key)
+
+                # 并发执行所有搜索
+                search_tasks = [bounded_search(key.strip()) for key in web_search_keys]
+                search_results = await asyncio.gather(*search_tasks)
+
+                # 过滤掉 None 结果并添加到 web_search_content
+                web_search_content.extend([r for r in search_results if r is not None])
+                logger.info(
+                    f"网络搜索聚合完成，总长度: {sum([len(r) for r in web_search_content])}"
+                )
+                response = {
+                    "id": chat_id,
+                    "object": "chat.completion.chunk",
+                    "created": created_time,
+                    "model": deepseek_model,
+                    "choices": [
+                        {
+                            "index": 0,
+                            "delta": {
+                                "role": "assistant",
+                                "reasoning_content": f"**Finished {len(web_search_content)} searches**\n\n---\n\n",
+                                "content": "",
                             },
-                        ) as response:
-                            result = await response.text()
-                            logger.debug(
-                                f"网络搜索 返回值: {result}，状态码: {response.status}"
-                            )
-                            if response.status != 200:
-                                logger.error(f"网络搜索失败，状态码: {response.status}")
-                            else:
-                                logger.info(f"网络搜索完成，返回长度: {len(result)}")
-                                web_search_result = result
-                except Exception as e:
-                    logger.error(f"网络搜索失败: {e}")
+                        }
+                    ],
+                }
+                await output_queue.put(
+                    f"data: {json.dumps(response)}\n\n".encode("utf-8")
+                )
+
+            await web_search_queue_1.put(web_search_content)
+            await web_search_queue_2.put(web_search_content)
 
         async def process_deepseek(messages: list):
+            web_search_content = await web_search_queue_1.get()
             logger.info(
                 f"开始处理 DeepSeek 流，使用模型：{deepseek_model}, 提供商: {self.deepseek_client.provider}"
             )
@@ -205,9 +276,16 @@ class DeepClaude:
                         text
                         + "\n\n<system>The above message contains images, which have been hidden by the system because the MODEL cannot process images. You only need to assume that the images exist and think about the user's question in the language used by the user</system>"
                     )
-            if web_search_result:
+            if web_search_content:
                 messages[-1]["content"] = (
-                    f"<original_prompt>\n{messages[-1]['content']}\n</original_prompt>\n\n<web_search_result>\n{web_search_result}\n</web_search_result><system>The above message is a result of an online search, both the time and content are real results, which may not match your database because your database is up to an earlier time, but the current time has changed. Please think based on the search results and use the language of the user's question</system>"
+                    f"<original_prompt>\n{messages[-1]['content']}\n</original_prompt>\n\n"
+                )
+                for i, content in enumerate(web_search_content):
+                    messages[-1]["content"] += (
+                        f"<web_search_result_{i}>\n{content}\n</web_search_result_{i}>\n"
+                    )
+                messages[-1]["content"] += (
+                    "\n\n<system>The above content are the results of online searching, both the time and content are real, which may not match your database because your database is up to an earlier time, but the current time has changed. Please think based on the search results. **Use the language of the original prompt for reasoning and answer**</system>"
                 )
             try:
                 async for content_type, content in self.deepseek_client.stream_chat(
@@ -253,6 +331,7 @@ class DeepClaude:
             await output_queue.put(None)
 
         async def process_claude(messages: list):
+            web_search_content = await web_search_queue_2.get()
             try:
                 logger.info("等待获取 DeepSeek 的推理内容...")
                 reasoning = await claude_queue.get()
@@ -283,8 +362,11 @@ class DeepClaude:
                     def set_last_message_text(text):
                         last_message["content"] = text
 
-                if web_search_result:
-                    last_message_text = f"<original_prompt>\n{last_message_text}\n</original_prompt>\n\n<web_search_result>\n{web_search_result}\n<system>The above message is a network search result, and the time and content are both real results, which may not match your database because your database is up to an earlier time, but the current time has changed. Please consider based on the search results.</system>\n</web_search_result>"
+                if web_search_content:
+                    last_message_text = f"<original_prompt>\n{last_message_text}\n</original_prompt>\n\n"
+                    for i, content in enumerate(web_search_content):
+                        last_message_text += f"<web_search_result_{i}>\n{content}\n</web_search_result_{i}>\n"
+                    last_message_text += "<system>The above content are the results of online searching, both the time and content are real, which may not match your database because your database is up to an earlier time, but the current time has changed. Please consider based on the search results. **Use the language of the original prompt for answer**</system>"
 
                 if not reasoning:
                     logger.info("推理内容为空，将使用默认提示继续")
@@ -336,9 +418,14 @@ class DeepClaude:
 
         # 创建并发任务
 
+        if enable_web_search:
+            asyncio.create_task(process_web_search(messages))
+        else:
+            await web_search_queue_1.put([])
+            await web_search_queue_2.put([])
+
         deepseek_messages = deepcopy(messages)
         claude_messages = deepcopy(messages)
-
         asyncio.create_task(process_deepseek(deepseek_messages))
         asyncio.create_task(process_claude(claude_messages))
 

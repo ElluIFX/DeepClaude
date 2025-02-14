@@ -30,7 +30,6 @@ DEEPSEEK_MODEL = os.getenv("DEEPSEEK_MODEL")
 
 IS_ORIGIN_REASONING = os.getenv("IS_ORIGIN_REASONING", "True").lower() == "true"
 
-ENABLE_WEB_SEARCH = os.getenv("ENABLE_WEB_SEARCH", "False").lower() == "true"
 WEB_SEARCH_MODEL = os.getenv("WEB_SEARCH_MODEL")
 WEB_SEARCH_API_KEY = os.getenv("WEB_SEARCH_API_KEY")
 WEB_SEARCH_API_URL = os.getenv("WEB_SEARCH_API_URL")
@@ -66,7 +65,6 @@ deep_claude = DeepClaude(
     CLAUDE_API_URL,
     CLAUDE_PROVIDER,
     IS_ORIGIN_REASONING,
-    ENABLE_WEB_SEARCH,
     WEB_SEARCH_TOKEN,
     WEB_SEARCH_MAX_RESULTS,
     WEB_SEARCH_CRAWL_RESULTS,
@@ -94,7 +92,7 @@ async def list_models():
     """
     models = [
         {
-            "id": "deepclaude",
+            "id": "deep-claude",
             "object": "model",
             "created": 1677610602,
             "owned_by": "deepclaude",
@@ -116,7 +114,31 @@ async def list_models():
             ],
             "root": "deepclaude",
             "parent": None,
-        }
+        },
+        {
+            "id": "deep-claude-plus",
+            "object": "model",
+            "created": 1677610602,
+            "owned_by": "deepclaude",
+            "permission": [
+                {
+                    "id": "modelperm-deepclaude",
+                    "object": "model_permission",
+                    "created": 1677610602,
+                    "allow_create_engine": False,
+                    "allow_sampling": True,
+                    "allow_logprobs": True,
+                    "allow_search_indices": False,
+                    "allow_view": True,
+                    "allow_fine_tuning": False,
+                    "organization": "*",
+                    "group": None,
+                    "is_blocking": False,
+                }
+            ],
+            "root": "deepclaude",
+            "parent": None,
+        },
     ]
     logger.debug(f"返回模型列表: {models}")
     return {"object": "list", "data": models}
@@ -146,6 +168,10 @@ async def chat_completions(request: Request):
         # 2. 获取并验证参数
         model_arg = get_and_validate_params(body)
         stream = model_arg["stream"]  # 获取 stream 参数
+        model = model_arg["model"]
+
+        if model not in ["deep-claude", "deep-claude-plus"]:
+            return {"error": "Model not supported"}
 
         # 3. 根据 stream 参数返回相应的响应
         if stream:
@@ -155,6 +181,7 @@ async def chat_completions(request: Request):
                     model_arg=model_arg,
                     deepseek_model=DEEPSEEK_MODEL,
                     claude_model=CLAUDE_MODEL,
+                    enable_web_search=model == "deep-claude-plus",
                 ),
                 media_type="text/event-stream",
             )
@@ -175,10 +202,9 @@ def get_and_validate_params(body):
     frequency_penalty: float = body.get("frequency_penalty", 0.0)
     stream: bool = body.get("stream", True)
     reasoning_effort: str = body.get("reasoning_effort", "medium")
+    model: str = body.get("model", "")
 
-    if "sonnet" in body.get(
-        "model", ""
-    ):  # Only Sonnet 设定 temperature 必须在 0 到 1 之间
+    if "sonnet" in model:  # Only Sonnet 设定 temperature 必须在 0 到 1 之间
         if (
             not isinstance(temperature, (float))
             or temperature < 0.0
@@ -193,4 +219,5 @@ def get_and_validate_params(body):
         "frequency_penalty": frequency_penalty,
         "reasoning_effort": reasoning_effort,
         "stream": stream,
+        "model": model,
     }
