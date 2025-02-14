@@ -110,7 +110,7 @@ class DeepSeekClient(BaseClient):
                                 "content"
                             ):
                                 content = delta["content"]
-                                logger.info(f"提取内容信息，推理阶段结束: {content}")
+                                # logger.info(f"提取内容信息，推理阶段结束: {content}")
                                 yield "content", content
                         else:
                             # 处理其他模型的输出

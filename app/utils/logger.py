@@ -8,4 +8,8 @@ from loguru import logger
 load_dotenv()
 
 logger.remove()
-logger.add(sys.stderr, level=os.getenv("LOG_LEVEL", "INFO"))
+if not os.environ.get("NO_STDERR"):
+    logger.add(sys.stderr, level=os.getenv("LOG_LEVEL", "INFO"))
+
+cwd = os.getcwd()
+logger.add(cwd + "/logs/{time}.log", level=os.getenv("LOG_LEVEL", "INFO"))

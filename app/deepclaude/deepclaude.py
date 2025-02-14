@@ -28,6 +28,7 @@ keyword1 keyword2 ... keywordB keywordB ...
 -The number of keywords per search request should be 3 to 6, and single keywords can be used for requests with strong pointers such as names of people and places.
 - - You need to determine the complexity of the search, for simple questions try to use only 1 request, while for complex questions (e.g. multi-language integrated searches, multi-subject topics, etc.) you can create 2-4 search requests, not more than 5 at most.
 - Finally, if the content of the user's command specifies that an online search is required, summarize the keywords according to the user's command even if you don't think you need to invoke a search.
+- About "latest": The latest time now is far away from year 2023, when user request latest news, just search without time, especially dont add "2023" as keyword
 - IMPORTANT: You can only output the keyword sequence, or "NO". You don't need to add any explanations or answer anything from the user's command, they are the tasks for another model.
 """
 
@@ -80,6 +81,7 @@ class DeepClaude:
         deepseek_model: str = "deepseek-reasoner",
         claude_model: str = "claude-3-5-sonnet-20241022",
         enable_web_search: bool = False,
+        enable_claude: bool = True,
     ) -> AsyncGenerator[bytes, None]:
         """处理完整的流式输出过程
 
@@ -282,13 +284,33 @@ class DeepClaude:
                         reasoning_content.append(content)
                         await send_reasoning_response(content)
                     elif content_type == "content":
-                        # 当收到 content 类型时，将完整的推理内容发送到 claude_queue，并结束 DeepSeek 流处理
-                        full_reasoning = "".join(reasoning_content).strip()
-                        logger.info(
-                            f"DeepSeek 推理完成，收集到的推理内容长度：{len(full_reasoning)}"
-                        )
-                        await claude_queue.put(full_reasoning)
-                        break
+                        if enable_claude:
+                            # 当收到 content 类型时，将完整的推理内容发送到 claude_queue，并结束 DeepSeek 流处理
+                            full_reasoning = "".join(reasoning_content).strip()
+                            logger.info(
+                                f"DeepSeek 推理完成，收集到的推理内容长度：{len(full_reasoning)}"
+                            )
+                            await claude_queue.put(full_reasoning)
+                            break
+                        else:
+                            response = {
+                                "id": chat_id,
+                                "object": "chat.completion.chunk",
+                                "created": created_time,
+                                "model": deepseek_model,
+                                "choices": [
+                                    {
+                                        "index": 0,
+                                        "delta": {
+                                            "role": "assistant",
+                                            "content": content,
+                                        },
+                                    }
+                                ],
+                            }
+                            await output_queue.put(
+                                f"data: {json.dumps(response)}\n\n".encode("utf-8")
+                            )
             except Exception as e:
                 logger.error(f"处理 DeepSeek 流时发生错误: {e}")
                 await claude_queue.put("")
@@ -393,11 +415,12 @@ class DeepClaude:
         deepseek_messages = deepcopy(messages)
         claude_messages = deepcopy(messages)
         asyncio.create_task(process_deepseek(deepseek_messages))
-        asyncio.create_task(process_claude(claude_messages))
+        if enable_claude:
+            asyncio.create_task(process_claude(claude_messages))
 
-        # 等待两个任务完成，通过计数判断
+        # 等待任务完成，通过计数判断
         finished_tasks = 0
-        while finished_tasks < 2:
+        while finished_tasks < (2 if enable_claude else 1):
             item = await output_queue.get()
             if item is None:
                 finished_tasks += 1

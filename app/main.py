@@ -139,6 +139,30 @@ async def list_models():
             "root": "deepclaude",
             "parent": None,
         },
+        {
+            "id": "deepseek-plus",
+            "object": "model",
+            "created": 1677610602,
+            "owned_by": "deepclaude",
+            "permission": [
+                {
+                    "id": "modelperm-deepclaude",
+                    "object": "model_permission",
+                    "created": 1677610602,
+                    "allow_create_engine": False,
+                    "allow_sampling": True,
+                    "allow_logprobs": True,
+                    "allow_search_indices": False,
+                    "allow_view": True,
+                    "allow_fine_tuning": False,
+                    "organization": "*",
+                    "group": None,
+                    "is_blocking": False,
+                }
+            ],
+            "root": "deepclaude",
+            "parent": None,
+        },
     ]
     logger.debug(f"返回模型列表: {models}")
     return {"object": "list", "data": models}
@@ -170,7 +194,7 @@ async def chat_completions(request: Request):
         stream = model_arg["stream"]  # 获取 stream 参数
         model = model_arg["model"]
 
-        if model not in ["deep-claude", "deep-claude-plus"]:
+        if model not in ["deep-claude", "deep-claude-plus", "deepseek-plus"]:
             return {"error": "Model not supported"}
 
         # 3. 根据 stream 参数返回相应的响应
@@ -181,7 +205,9 @@ async def chat_completions(request: Request):
                     model_arg=model_arg,
                     deepseek_model=DEEPSEEK_MODEL,
                     claude_model=CLAUDE_MODEL,
-                    enable_web_search=model == "deep-claude-plus",
+                    enable_web_search=model == "deep-claude-plus"
+                    or model == "deepseek-plus",
+                    enable_claude=model != "deepseek-plus",
                 ),
                 media_type="text/event-stream",
             )
