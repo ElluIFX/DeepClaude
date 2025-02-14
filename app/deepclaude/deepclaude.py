@@ -121,6 +121,25 @@ class DeepClaude:
         # 用于存储 DeepSeek 的推理累积内容
         reasoning_content = []
 
+        async def send_reasoning_response(reasoning_content: str):
+            response = {
+                "id": chat_id,
+                "object": "chat.completion.chunk",
+                "created": created_time,
+                "model": deepseek_model,
+                "choices": [
+                    {
+                        "index": 0,
+                        "delta": {
+                            "role": "assistant",
+                            "reasoning_content": reasoning_content,
+                            "content": "",
+                        },
+                    }
+                ],
+            }
+            await output_queue.put(f"data: {json.dumps(response)}\n\n".encode("utf-8"))
+
         async def process_web_search(messages: list):
             web_search_content = []
             # 检查是否需要进行网络搜索
@@ -156,34 +175,14 @@ class DeepClaude:
             if web_search_keys.lower() == "no":
                 logger.info("不需要进行网络搜索")
             else:
-                info = "**Web Searching...**\n\n"
-                for key in web_search_keys.split(";"):
-                    info += f"- {key}\n"
-                response = {
-                    "id": chat_id,
-                    "object": "chat.completion.chunk",
-                    "created": created_time,
-                    "model": deepseek_model,
-                    "choices": [
-                        {
-                            "index": 0,
-                            "delta": {
-                                "role": "assistant",
-                                "reasoning_content": info + "\n\n",
-                                "content": "",
-                            },
-                        }
-                    ],
-                }
-                await output_queue.put(
-                    f"data: {json.dumps(response)}\n\n".encode("utf-8")
-                )
+                await send_reasoning_response("**Web Searching...**\n\n")
                 web_search_keys = web_search_keys.split(";")
                 MAX_CONCURRENT_SEARCHES = 8
 
                 async def perform_search(search_key):
                     try:
                         logger.info(f"发起网络搜索，关键词: {search_key}")
+                        await send_reasoning_response(f"- {search_key}\n")
                         async with aiohttp.ClientSession() as session:
                             async with session.post(
                                 url="https://api.search1api.com/search",
@@ -233,24 +232,8 @@ class DeepClaude:
                 logger.info(
                     f"网络搜索聚合完成，总长度: {sum([len(r) for r in web_search_content])}"
                 )
-                response = {
-                    "id": chat_id,
-                    "object": "chat.completion.chunk",
-                    "created": created_time,
-                    "model": deepseek_model,
-                    "choices": [
-                        {
-                            "index": 0,
-                            "delta": {
-                                "role": "assistant",
-                                "reasoning_content": f"**Finished {len(web_search_content)} searches**\n\n---\n\n",
-                                "content": "",
-                            },
-                        }
-                    ],
-                }
-                await output_queue.put(
-                    f"data: {json.dumps(response)}\n\n".encode("utf-8")
+                await send_reasoning_response(
+                    f"\n\n**Finished {len(web_search_content)} searches**\n\n---\n\n"
                 )
 
             await web_search_queue_1.put(web_search_content)
@@ -297,25 +280,7 @@ class DeepClaude:
                 ):
                     if content_type == "reasoning":
                         reasoning_content.append(content)
-                        response = {
-                            "id": chat_id,
-                            "object": "chat.completion.chunk",
-                            "created": created_time,
-                            "model": deepseek_model,
-                            "choices": [
-                                {
-                                    "index": 0,
-                                    "delta": {
-                                        "role": "assistant",
-                                        "reasoning_content": content,
-                                        "content": "",
-                                    },
-                                }
-                            ],
-                        }
-                        await output_queue.put(
-                            f"data: {json.dumps(response)}\n\n".encode("utf-8")
-                        )
+                        await send_reasoning_response(content)
                     elif content_type == "content":
                         # 当收到 content 类型时，将完整的推理内容发送到 claude_queue，并结束 DeepSeek 流处理
                         full_reasoning = "".join(reasoning_content).strip()
