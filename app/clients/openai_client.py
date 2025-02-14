@@ -13,17 +13,16 @@ class OpenAIClient(BaseClient):
         self,
         api_key: str,
         api_url: str = "https://api.openai.com/v1/chat/completions",
-        provider: str = "openai",
+        provider: str = "OpenAI"
     ):
         """Initialize OpenAI client
 
         Args:
             api_key: OpenAI API key
             api_url: OpenAI API base URL
-            provider: API provider name
         """
-        super().__init__(api_key, api_url)
         self.provider = provider
+        super().__init__(api_key, api_url)
 
     async def stream_chat(
         self,

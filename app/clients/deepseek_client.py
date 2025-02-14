@@ -1,7 +1,6 @@
 """DeepSeek API 客户端"""
 
 import json
-from copy import deepcopy
 from typing import AsyncGenerator
 
 from app.utils.logger import logger
@@ -71,24 +70,6 @@ class DeepSeekClient(BaseClient):
             "Content-Type": "application/json",
             "Accept": "text/event-stream",
         }
-        messages = deepcopy(messages)
-
-        for message in messages:
-            if "image_url" in str(message.get("content", "")):
-                content = message["content"]
-                if not isinstance(content, list):
-                    continue
-                text = ""
-                for item in content:
-                    if item.get("type", "") == "text":
-                        text += item.get("text", "")
-                    else:
-                        text += "\n<image>\n"
-                message["content"] = (
-                    text
-                    + "\n\n<system>上述消息包含图片，由于MODEL无法处理图片已被系统隐藏，你只需要假设图片存在并思考用户的问题</system>"
-                )
-
         data = {
             "model": model,
             "messages": messages,
@@ -122,7 +103,7 @@ class DeepSeekClient(BaseClient):
                             # 处理 reasoning_content
                             if delta.get("reasoning_content"):
                                 content = delta["reasoning_content"]
-                                logger.debug(f"提取推理内容：{content}")
+                                # logger.debug(f"提取推理内容：{content}")
                                 yield "reasoning", content
 
                             if delta.get("reasoning_content") is None and delta.get(
@@ -137,7 +118,7 @@ class DeepSeekClient(BaseClient):
                                 content = delta["content"]
                                 if content == "":  # 只跳过完全空的字符串
                                     continue
-                                logger.debug(f"非原生推理内容：{content}")
+                                # logger.debug(f"非原生推理内容：{content}")
                                 accumulated_content += content
 
                                 # 检查累积的内容是否包含完整的 think 标签对

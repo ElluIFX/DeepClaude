@@ -21,16 +21,25 @@ ALLOW_ORIGINS = os.getenv("ALLOW_ORIGINS", "*")
 
 CLAUDE_API_KEY = os.getenv("CLAUDE_API_KEY")
 CLAUDE_MODEL = os.getenv("CLAUDE_MODEL")
-CLAUDE_PROVIDER = os.getenv(
-    "CLAUDE_PROVIDER", "anthropic"
-)  # Claude模型提供商, 默认为anthropic
-CLAUDE_API_URL = os.getenv("CLAUDE_API_URL", "https://api.anthropic.com/v1/messages")
+CLAUDE_PROVIDER = os.getenv("CLAUDE_PROVIDER")
+CLAUDE_API_URL = os.getenv("CLAUDE_API_URL")
 
 DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY")
 DEEPSEEK_API_URL = os.getenv("DEEPSEEK_API_URL")
 DEEPSEEK_MODEL = os.getenv("DEEPSEEK_MODEL")
 
 IS_ORIGIN_REASONING = os.getenv("IS_ORIGIN_REASONING", "True").lower() == "true"
+
+ENABLE_WEB_SEARCH = os.getenv("ENABLE_WEB_SEARCH", "False").lower() == "true"
+WEB_SEARCH_MODEL = os.getenv("WEB_SEARCH_MODEL")
+WEB_SEARCH_API_KEY = os.getenv("WEB_SEARCH_API_KEY")
+WEB_SEARCH_API_URL = os.getenv("WEB_SEARCH_API_URL")
+WEB_SEARCH_TOKEN = os.getenv("WEB_SEARCH_TOKEN")
+WEB_SEARCH_MAX_RESULTS = os.getenv("WEB_SEARCH_MAX_RESULTS", 12)
+WEB_SEARCH_CRAWL_RESULTS = os.getenv("WEB_SEARCH_CRAWL_RESULTS", 4)
+if not WEB_SEARCH_TOKEN:
+    logger.warning("未设置 WEB_SEARCH_TOKEN，将禁用 Web 搜索")
+    ENABLE_WEB_SEARCH = False
 
 # CORS设置
 allow_origins_list = (
@@ -57,6 +66,13 @@ deep_claude = DeepClaude(
     CLAUDE_API_URL,
     CLAUDE_PROVIDER,
     IS_ORIGIN_REASONING,
+    ENABLE_WEB_SEARCH,
+    WEB_SEARCH_TOKEN,
+    WEB_SEARCH_MAX_RESULTS,
+    WEB_SEARCH_CRAWL_RESULTS,
+    WEB_SEARCH_MODEL,
+    WEB_SEARCH_API_KEY,
+    WEB_SEARCH_API_URL,
 )
 
 # 验证日志级别
@@ -143,14 +159,7 @@ async def chat_completions(request: Request):
                 media_type="text/event-stream",
             )
         else:
-            # 非流式输出
-            response = await deep_claude.chat_completions_without_stream(
-                messages=messages,
-                model_arg=model_arg,
-                deepseek_model=DEEPSEEK_MODEL,
-                claude_model=CLAUDE_MODEL,
-            )
-            return response
+            return {"error": "Only streaming is supported"}
 
     except Exception as e:
         logger.error(f"处理请求时发生错误: {e}")
