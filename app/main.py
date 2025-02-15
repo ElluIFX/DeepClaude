@@ -1,6 +1,8 @@
 import os
 import sys
+from copy import deepcopy
 
+import aiohttp
 from dotenv import load_dotenv
 from loguru import logger
 
@@ -62,81 +64,52 @@ async def list_models():
     获取可用模型列表
     返回格式遵循 OpenAI API 标准
     """
+
+    def build_model(id: str):
+        return {
+            "id": id,
+            "object": "model",
+            "created": 1677610602,
+            "owned_by": "deepclaude",
+        }
+
+    # 尝试请求二级api获取二级模型列表
+    PREFIX_WHITELIST = ["claude", "gpt", "o1", "o3", "gemini"]
     models = [
-        {
-            "id": "deep-claude",
-            "object": "model",
-            "created": 1677610602,
-            "owned_by": "deepclaude",
-            "permission": [
-                {
-                    "id": "modelperm-deepclaude",
-                    "object": "model_permission",
-                    "created": 1677610602,
-                    "allow_create_engine": False,
-                    "allow_sampling": True,
-                    "allow_logprobs": True,
-                    "allow_search_indices": False,
-                    "allow_view": True,
-                    "allow_fine_tuning": False,
-                    "organization": "*",
-                    "group": None,
-                    "is_blocking": False,
-                }
-            ],
-            "root": "deepclaude",
-            "parent": None,
-        },
-        {
-            "id": "deep-claude-net",
-            "object": "model",
-            "created": 1677610602,
-            "owned_by": "deepclaude",
-            "permission": [
-                {
-                    "id": "modelperm-deepclaude",
-                    "object": "model_permission",
-                    "created": 1677610602,
-                    "allow_create_engine": False,
-                    "allow_sampling": True,
-                    "allow_logprobs": True,
-                    "allow_search_indices": False,
-                    "allow_view": True,
-                    "allow_fine_tuning": False,
-                    "organization": "*",
-                    "group": None,
-                    "is_blocking": False,
-                }
-            ],
-            "root": "deepclaude",
-            "parent": None,
-        },
-        {
-            "id": "deepseek-r1-net",
-            "object": "model",
-            "created": 1677610602,
-            "owned_by": "deepclaude",
-            "permission": [
-                {
-                    "id": "modelperm-deepclaude",
-                    "object": "model_permission",
-                    "created": 1677610602,
-                    "allow_create_engine": False,
-                    "allow_sampling": True,
-                    "allow_logprobs": True,
-                    "allow_search_indices": False,
-                    "allow_view": True,
-                    "allow_fine_tuning": False,
-                    "organization": "*",
-                    "group": None,
-                    "is_blocking": False,
-                }
-            ],
-            "root": "deepclaude",
-            "parent": None,
-        },
+        build_model("deepclaude"),
+        build_model("deepclaude-net"),
+        build_model("deepseek-net"),
     ]
-    logger.debug(f"返回模型列表: {models}")
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(
+                os.getenv("MODEL_LIST_API_URL"),
+                headers={
+                    "Authorization": f"Bearer {os.getenv('MODEL_LIST_API_KEY')}",
+                },
+            ) as response:
+                assert response.status == 200
+                ret = await response.json()
+                models_secondary = [
+                    m
+                    for m in ret["data"]
+                    if any(m["id"].startswith(prefix) for prefix in PREFIX_WHITELIST)
+                ]
+                # logger.debug(f"二级模型列表: {models_secondary}")
+            for model in models_secondary:
+                _ = deepcopy(model)
+                _["id"] = _["id"] + "-deep"
+                models.append(_)
+                _ = deepcopy(model)
+                _["id"] = _["id"] + "-net"
+                models.append(_)
+                _ = deepcopy(model)
+                _["id"] = _["id"] + "-deepnet"
+                models.append(_)
+    except Exception as e:
+        logger.error(f"获取二级模型列表失败: {e}")
+
+    # logger.debug(f"返回模型列表: {models}")
     return {"object": "list", "data": models}
 
 
@@ -179,6 +152,7 @@ async def chat_completions(request: Request):
                     answering_model=model_arg["answering_model"],
                     enable_web_search=model_arg["enable_web_search"],
                     enable_answering=model_arg["enable_answering"],
+                    enable_reasoning=model_arg["enable_reasoning"],
                 ),
                 media_type="text/event-stream",
             )
@@ -208,14 +182,44 @@ def get_and_validate_params(body):
         ):
             raise ValueError("Sonnet 设定 temperature 必须在 0 到 1 之间")
 
-    enable_web_search = model.endswith("-net")
-    model = model.removesuffix("-net")
-    enable_answering = model.startswith("deep-")
-    model = model.removeprefix("deep-")
+    enable_web_search = {
+        "deepclaude": False,
+        "deepclaude-net": True,
+        "deepseek-net": True,
+    }.get(model, False)
+    enable_answering = {
+        "deepclaude": True,
+        "deepclaude-net": True,
+        "deepseek-net": False,
+    }.get(model, False)
+    enable_reasoning = {
+        "deepclaude": True,
+        "deepclaude-net": True,
+        "deepseek-net": True,
+    }.get(model, False)
 
-    answering_model = os.getenv("ANSWERING_MODEL")
-    if model != "claude":
-        answering_model = model
+    if model.endswith("-deepnet"):
+        model = model.removesuffix("-deepnet")
+        enable_reasoning = True
+        enable_answering = True
+        enable_web_search = True
+    elif model.endswith("-deep"):
+        model = model.removesuffix("-deep")
+        enable_reasoning = True
+        enable_answering = True
+        enable_web_search = False
+    elif model.endswith("-net"):
+        model = model.removesuffix("-net")
+        enable_reasoning = False
+        enable_answering = True
+        enable_web_search = True
+
+    reasoning_model = os.getenv("REASONING_MODEL")
+    answering_model = (
+        os.getenv("ANSWERING_MODEL")
+        if model in ["deepclaude", "deepclaude-net", "deepseek-net"]
+        else model
+    )
 
     return {
         "temperature": temperature,
@@ -225,8 +229,9 @@ def get_and_validate_params(body):
         "reasoning_effort": reasoning_effort,
         "stream": stream,
         "model": model,
+        "enable_reasoning": enable_reasoning,
         "enable_web_search": enable_web_search,
         "enable_answering": enable_answering,
-        "reasoning_model": os.getenv("REASONING_MODEL"),
+        "reasoning_model": reasoning_model,
         "answering_model": answering_model,
     }

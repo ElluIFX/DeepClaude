@@ -77,6 +77,7 @@ class DeepClaude:
         reasoning_model: str,
         answering_model: str,
         enable_web_search: bool = False,
+        enable_reasoning: bool = True,
         enable_answering: bool = True,
     ) -> AsyncGenerator[bytes, None]:
         """处理完整的流式输出过程
@@ -87,7 +88,8 @@ class DeepClaude:
             reasoning_model: 推理模型名称
             answering_model: 回答模型名称
             enable_web_search: 是否启用 Web 搜索
-            enable_answering: 是否启用二级模型回答
+            enable_reasoning: 是否启用推理模型
+            enable_answering: 是否启用回答模型回答
 
         Yields:
             字节流数据，格式如下：
@@ -106,15 +108,17 @@ class DeepClaude:
                 }]
             }
         """
+
+        assert enable_reasoning or enable_answering  # 总得有事干吧
         # 生成唯一的会话ID和时间戳
         chat_id = f"chatcmpl-{hex(int(time.time() * 1000))[2:]}"
         created_time = int(time.time())
 
         # 创建队列，用于收集输出数据
         output_queue = asyncio.Queue()
-        # 队列，用于传递 DeepSeek 推理内容给二级模型
-        answering_queue = asyncio.Queue()
-        # 队列，用于传递网络搜索结果给一级模型和二级模型
+        # 队列，用于传递 DeepSeek 推理内容给回答模型
+        reasoning_queue = asyncio.Queue()
+        # 队列，用于传递网络搜索结果给推理模型和回答模型
         web_search_queue_1 = asyncio.Queue()
         web_search_queue_2 = asyncio.Queue()
 
@@ -239,13 +243,15 @@ class DeepClaude:
                     f"\n\n**Finished {len(web_search_content)} searches**\n\n---\n\n"
                 )
 
+            logger.info("网络搜索任务处理完成")
             await web_search_queue_1.put(web_search_content)
             await web_search_queue_2.put(web_search_content)
+            await output_queue.put(None)  # 标记网络搜索任务结束
 
         async def process_reasoning(messages: list):
             web_search_content = await web_search_queue_1.get()
             logger.info(
-                f"开始处理一级模型流，使用模型：{reasoning_model}, 提供商: {self.reasoning_client.provider}"
+                f"开始处理推理模型流，使用模型：{reasoning_model}, 提供商: {self.reasoning_client.provider}"
             )
             new_messages = []
             for message in messages:
@@ -291,9 +297,9 @@ class DeepClaude:
                             # 当收到 content 类型时，将完整的推理内容发送到 claude_queue，并结束 DeepSeek 流处理
                             full_reasoning = "".join(reasoning_content).strip()
                             logger.info(
-                                f"一级模型推理完成，收集到的推理内容长度：{len(full_reasoning)}"
+                                f"推理模型推理完成，收集到的推理内容长度：{len(full_reasoning)}"
                             )
-                            await answering_queue.put(full_reasoning)
+                            await reasoning_queue.put(full_reasoning)
                             break
                         else:
                             response = {
@@ -315,20 +321,19 @@ class DeepClaude:
                                 f"data: {json.dumps(response)}\n\n".encode("utf-8")
                             )
             except Exception as e:
-                logger.error(f"处理一级模型流时发生错误: {e}")
+                logger.error(f"处理推理模型流时发生错误: {e}")
+                await reasoning_queue.put("")
                 raise HTTPException(
-                    status_code=500, detail=f"处理一级模型流时发生错误: {e}"
+                    status_code=500, detail=f"处理推理模型流时发生错误: {e}"
                 )
-                await answering_queue.put("")
-            # 用 None 标记一级模型任务结束
-            logger.info("一级模型任务处理完成，标记结束")
-            await output_queue.put(None)
+            logger.info("推理模型任务处理完成")
+            await output_queue.put(None)  # 用 None 标记推理模型任务结束
 
         async def process_answering(messages: list):
             web_search_content = await web_search_queue_2.get()
             try:
-                logger.info("等待获取一级模型的推理内容...")
-                reasoning = await answering_queue.get()
+                logger.info("等待获取推理模型的推理内容...")
+                reasoning = await reasoning_queue.get()
                 logger.debug(
                     f"获取到推理内容，内容长度：{len(reasoning) if reasoning else 0}，内容：{reasoning}"
                 )
@@ -388,7 +393,7 @@ class DeepClaude:
                 # ]
 
                 logger.info(
-                    f"开始处理二级模型流，使用模型: {answering_model}, 提供商: {self.answering_client.provider}"
+                    f"开始处理回答模型流，使用模型: {answering_model}, 提供商: {self.answering_client.provider}"
                 )
 
                 async for content_type, content in self.answering_client.stream_chat(
@@ -433,36 +438,40 @@ class DeepClaude:
                     )
 
             except Exception as e:
-                logger.error(f"处理二级模型流时发生错误: {e}")
+                logger.error(f"处理回答模型流时发生错误: {e}")
                 raise HTTPException(
-                    status_code=500, detail=f"处理二级模型流时发生错误: {e}"
+                    status_code=500, detail=f"处理回答模型流时发生错误: {e}"
                 )
-            # 用 None 标记二级模型任务结束
-            logger.info("二级模型任务处理完成，标记结束")
-            await output_queue.put(None)
+            logger.info("回答模型任务处理完成")
+            await output_queue.put(None)  # 标记回答模型任务结束
 
         # 创建并发任务
 
         if enable_web_search:
-            asyncio.create_task(process_web_search(messages))
+            asyncio.create_task(process_web_search(deepcopy(messages)))
         else:
             await web_search_queue_1.put([])
             await web_search_queue_2.put([])
 
-        reasoning_messages = deepcopy(messages)
-        answering_messages = deepcopy(messages)
-        asyncio.create_task(process_reasoning(reasoning_messages))
+        if enable_reasoning:
+            asyncio.create_task(process_reasoning(deepcopy(messages)))
+        else:
+            await reasoning_queue.put("")
+
         if enable_answering:
-            asyncio.create_task(process_answering(answering_messages))
+            asyncio.create_task(process_answering(deepcopy(messages)))
 
         # 等待任务完成，通过计数判断
         finished_tasks = 0
-        while finished_tasks < (2 if enable_answering else 1):
+        while finished_tasks < (
+            int(enable_web_search) + int(enable_reasoning) + int(enable_answering)
+        ):
             item = await output_queue.get()
             if item is None:
                 finished_tasks += 1
             else:
                 yield item
 
+        logger.info("所有任务处理完成")
         # 发送结束标记
         yield b"data: [DONE]\n\n"
