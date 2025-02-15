@@ -29,6 +29,7 @@ class OpenAIClient(BaseClient):
         messages: list,
         model_arg: dict,
         model: str = "gpt-3.5-turbo",
+        tools: list = [],
     ) -> AsyncGenerator[tuple[str, str], None]:
         """Stream chat with OpenAI API
 
@@ -36,12 +37,14 @@ class OpenAIClient(BaseClient):
             messages: List of messages
             model_arg: Model parameters dict [temperature, top_p, presence_penalty, frequency_penalty]
             model: Model name
+            tools: tools list
             stream: Whether to use streaming output
 
         Yields:
             tuple[str, str]: (content_type, content)
-                content_type: "answer"
+                content_type: "answer" or "tool_calls"
                 content: Actual text content
+                tool_calls: Actual tool calls content in list
         """
         headers = {
             "Authorization": f"Bearer {self.api_key}",
@@ -60,7 +63,10 @@ class OpenAIClient(BaseClient):
             "frequency_penalty": model_arg["frequency_penalty"],
         }
 
-        logger.debug(f"Starting chat: {data}")
+        if tools:
+            data["tools"] = tools
+
+        logger.info("开始流式对话")
 
         async for chunk in self._make_request(headers, data):
             chunk_str = chunk.decode("utf-8")
@@ -80,7 +86,14 @@ class OpenAIClient(BaseClient):
                             .get("delta", {})
                             .get("content", "")
                         )
+                        tool_calls = (
+                            data.get("choices", [{}])[0]
+                            .get("delta", {})
+                            .get("tool_calls", [])
+                        )
                         if content:
                             yield "answer", content
+                        if tool_calls:
+                            yield "tool_calls", tool_calls
                     except json.JSONDecodeError:
                         continue

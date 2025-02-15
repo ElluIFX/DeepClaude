@@ -8,9 +8,9 @@ from copy import deepcopy
 from typing import AsyncGenerator
 
 import aiohttp
-from loguru import logger
-
 from app.clients import DeepSeekClient, OpenAIClient
+from fastapi import HTTPException
+from loguru import logger
 
 WEB_SEARCH_CHECK_PROMPT = """You are a large-model online search assistance engine, and your task is to determine whether the user's latest prompt warrants a web search based on the context of the current conversation, in order to supplement the latest information that is missing from the large-model fixed knowledge base.
 - YOU DONT NEED TO ANSWER USER's QUESTION, just judge wheather a search request should be sent and what is in it.
@@ -30,6 +30,30 @@ keyword1 keyword2 ... keywordB keywordB ...
 - IMPORTANT: You can only output the keyword sequence, or "NO". You don't need to add any explanations or answer anything from the user's command, they are the tasks for another model.
 """
 
+IMAGE_NOTICE_PROMPT = """\n\n<system_notice>The message below contains images, which have been hidden by the system because the MODEL cannot process images. You only need to assume that the images exist and think about the user's question in the language used by the user</system_notice>\n\n"""
+
+TOOLCALL_NOTICE_PROMPT = """\n\n<system_notice>The message below is result returned by the tool calls, which are not visible to the user. You only need to assume that the tool calls finished and continue thinking about the user's last question in the language used by the user based on the results of the tool calls.</system_notice>\n\n"""
+
+
+def build_original_prompt(message: str):
+    return f'<original_prompt description="the messages sent by the user are as below">\n{message}\n</original_prompt>\n\n'
+
+
+def build_web_search_prompt(contents: str):
+    c = '<web_search_results description="The jsons below are the results returned by web searching tools, both the time and content are real, which may not match your database because your database is up to an earlier time, but the current time has changed. Please think based on the search results. **Use the language of the original prompt for reasoning and answer**">\n'
+    for i, content in enumerate(contents):
+        c += f"<result id={i}>\n{content}\n</result>\n"
+    c += "</web_search_results>\n\n"
+    return c
+
+
+def build_reasoning_prompt(reasoning: str):
+    return f'<reasoning description="The content below is from the reasoning assistant, which is the reasoning process for the message from the user, aiming to assist you to manage your answer, and which is not visible to the user. You should answer based on this reasoning">\n{reasoning}\n</reasoning>\n\n'
+
+
+def build_system_message(message: str):
+    return {"role": "system", "content": message}
+
 
 class DeepClaude:
     def __init__(self):
@@ -48,6 +72,7 @@ class DeepClaude:
     async def chat_completions_with_stream(
         self,
         messages: list,
+        tools: list,
         model_arg: dict,
         reasoning_model: str,
         answering_model: str,
@@ -222,7 +247,7 @@ class DeepClaude:
             logger.info(
                 f"开始处理一级模型流，使用模型：{reasoning_model}, 提供商: {self.reasoning_client.provider}"
             )
-
+            new_messages = []
             for message in messages:
                 if "image_url" in str(message.get("content", "")):
                     content = message["content"]
@@ -234,21 +259,24 @@ class DeepClaude:
                             text += item.get("text", "")
                         else:
                             text += "\n<image>\n"
-                    message["content"] = (
-                        text
-                        + "\n\n<system>The above message contains images, which have been hidden by the system because the MODEL cannot process images. You only need to assume that the images exist and think about the user's question in the language used by the user</system>"
-                    )
+                    message["content"] = IMAGE_NOTICE_PROMPT + text
+
+                if message.get("role", "") == "tool":
+                    message["content"] = TOOLCALL_NOTICE_PROMPT + message["content"]
+                    message["role"] = "user"
+
+                new_message = {
+                    "content": message["content"],
+                    "role": message["role"],
+                }
+                new_messages.append(new_message)
+
+            messages = new_messages
+
             if web_search_content:
-                messages[-1]["content"] = (
-                    f"<original_prompt>\n{messages[-1]['content']}\n</original_prompt>\n\n"
-                )
-                for i, content in enumerate(web_search_content):
-                    messages[-1]["content"] += (
-                        f"<web_search_result_{i}>\n{content}\n</web_search_result_{i}>\n"
-                    )
-                messages[-1]["content"] += (
-                    "\n\n<system>The above content are the results of online searching, both the time and content are real, which may not match your database because your database is up to an earlier time, but the current time has changed. Please think based on the search results. **Use the language of the original prompt for reasoning and answer**</system>"
-                )
+                messages[-1]["content"] = build_original_prompt(
+                    messages[-1]["content"]
+                ) + build_web_search_prompt(web_search_content)
             try:
                 async for content_type, content in self.reasoning_client.stream_chat(
                     messages,
@@ -288,6 +316,9 @@ class DeepClaude:
                             )
             except Exception as e:
                 logger.error(f"处理一级模型流时发生错误: {e}")
+                raise HTTPException(
+                    status_code=500, detail=f"处理一级模型流时发生错误: {e}"
+                )
                 await answering_queue.put("")
             # 用 None 标记一级模型任务结束
             logger.info("一级模型任务处理完成，标记结束")
@@ -302,44 +333,53 @@ class DeepClaude:
                     f"获取到推理内容，内容长度：{len(reasoning) if reasoning else 0}，内容：{reasoning}"
                 )
                 # 构造 Claude 的输入消息
-                last_message = {}
-                for message in messages[::-1]:
-                    if message.get("role", "") == "user":
-                        last_message = message
-                        break
-                last_message_text = ""
-                if isinstance(last_message["content"], list):
-                    for item in last_message["content"]:
-                        if item.get("type", "") == "text":
-                            last_message_text = item["text"]
-                            break
+                # last_message = {}
+                # for message in messages[::-1]:
+                #     if message.get("role", "") == "user":
+                #         last_message = message
+                #         break
+                # last_message_text = ""
+                # last_message_item = None
+                # if isinstance(last_message["content"], list):
+                #     for item in last_message["content"]:
+                #         if item.get("type", "") == "text":
+                #             last_message_text = item["text"]
+                #             last_message_item = item
+                #             break
 
-                    def set_last_message_text(text):
-                        for item in last_message:
-                            if item.get("type", "") == "text":
-                                item["text"] = text
-                                return
-                else:
-                    last_message_text = last_message["content"]
+                #     def set_last_message_text(text):
+                #         last_message_item["text"] = text
+                # else:
+                #     last_message_text = last_message["content"]
 
-                    def set_last_message_text(text):
-                        last_message["content"] = text
+                #     def set_last_message_text(text):
+                #         last_message["content"] = text
 
                 if web_search_content:
-                    last_message_text = f"<original_prompt>\n{last_message_text}\n</original_prompt>\n\n"
-                    for i, content in enumerate(web_search_content):
-                        last_message_text += f"<web_search_result_{i}>\n{content}\n</web_search_result_{i}>\n"
-                    last_message_text += "<system>The above content are the results of online searching, both the time and content are real, which may not match your database because your database is up to an earlier time, but the current time has changed. Please consider based on the search results. **Use the language of the original prompt for answer**</system>"
+                    #     last_message_text = build_original_prompt(
+                    #         last_message_text
+                    #     ) + build_web_search_result(web_search_content)
+                    messages.append(
+                        build_system_message(
+                            build_web_search_prompt(web_search_content)
+                        )
+                    )
 
                 if not reasoning:
                     logger.info("推理内容为空，将使用默认提示继续")
                 else:
-                    if "<original_prompt>" in last_message_text:
-                        last_message_text += f"\n\n<reasoning_assistant>\n{reasoning}\n</reasoning_assistant>"
-                    else:
-                        last_message_text = f"<original_prompt>\n{last_message_text}\n</original_prompt>\n\n<reasoning_assistant>\n{reasoning}\n</reasoning_assistant>"
+                    # if "<original_prompt>" in last_message_text:
+                    #     last_message_text += build_reasoning_assistant(reasoning)
+                    # else:
+                    #     last_message_text = build_original_prompt(
+                    #         last_message_text
+                    #     ) + build_reasoning_assistant(reasoning)
+                    messages.append(
+                        build_system_message(build_reasoning_prompt(reasoning))
+                    )
 
-                set_last_message_text(last_message_text)
+                # set_last_message_text(last_message_text)
+
                 # # 处理可能 messages 内存在 role = system 的情况，如果有，则去掉当前这一条的消息对象
                 # messages = [
                 #     message
@@ -355,6 +395,7 @@ class DeepClaude:
                     messages=messages,
                     model_arg=model_arg,
                     model=answering_model,
+                    tools=tools,
                 ):
                     if content_type == "answer":
                         response = {
@@ -369,11 +410,33 @@ class DeepClaude:
                                 }
                             ],
                         }
-                        await output_queue.put(
-                            f"data: {json.dumps(response)}\n\n".encode("utf-8")
-                        )
+                    elif content_type == "tool_calls":
+                        response = {
+                            "id": chat_id,
+                            "object": "chat.completion.chunk",
+                            "created": created_time,
+                            "model": answering_model,
+                            "choices": [
+                                {
+                                    "index": 0,
+                                    "delta": {
+                                        "content": "",
+                                        "tool_calls": content,
+                                    },
+                                }
+                            ],
+                        }
+                    else:
+                        continue
+                    await output_queue.put(
+                        f"data: {json.dumps(response)}\n\n".encode("utf-8")
+                    )
+
             except Exception as e:
                 logger.error(f"处理二级模型流时发生错误: {e}")
+                raise HTTPException(
+                    status_code=500, detail=f"处理二级模型流时发生错误: {e}"
+                )
             # 用 None 标记二级模型任务结束
             logger.info("二级模型任务处理完成，标记结束")
             await output_queue.put(None)

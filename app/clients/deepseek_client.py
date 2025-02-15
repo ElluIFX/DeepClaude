@@ -60,7 +60,7 @@ class DeepSeekClient(BaseClient):
             messages: 消息列表
             model: 模型名称
             model_arg: 模型参数
-
+            tools: 工具列表
 
         Yields:
             tuple[str, str]: (内容类型, 内容)
@@ -83,7 +83,7 @@ class DeepSeekClient(BaseClient):
             "frequency_penalty": model_arg["frequency_penalty"],
         }
 
-        logger.debug(f"开始流式对话：{data}")
+        logger.info("开始流式对话")
 
         accumulated_content = ""
         is_collecting_think = False
@@ -109,14 +109,14 @@ class DeepSeekClient(BaseClient):
                             # 处理 reasoning_content
                             if delta.get("reasoning_content"):
                                 content = delta["reasoning_content"]
-                                logger.debug(f"提取推理内容：{content}")
+                                # logger.debug(f"提取推理内容：{content}")
                                 yield "reasoning", content
 
                             if delta.get("reasoning_content") is None and delta.get(
                                 "content"
                             ):
                                 content = delta["content"]
-                                logger.info(f"提取内容信息，推理阶段结束: {content}")
+                                # logger.info(f"提取内容信息，推理阶段结束: {content}")
                                 yield "content", content
                         else:
                             # 处理其他模型的输出
@@ -124,7 +124,7 @@ class DeepSeekClient(BaseClient):
                                 content = delta["content"]
                                 if content == "":  # 只跳过完全空的字符串
                                     continue
-                                logger.debug(f"非原生推理内容：{content}")
+                                # logger.debug(f"非原生推理内容：{content}")
                                 accumulated_content += content
 
                                 # 检查累积的内容是否包含完整的 think 标签对

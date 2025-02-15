@@ -30,6 +30,7 @@ class BaseClient(ABC):
         Yields:
             bytes: 原始响应数据
         """
+        logger.debug(f"发送请求体：{data}，请求头：{headers}")
         try:
             async with aiohttp.ClientSession() as session:
                 async with session.post(
@@ -41,6 +42,7 @@ class BaseClient(ABC):
                         return
 
                     async for chunk in response.content.iter_any():
+                        # logger.debug(f"chunk: {chunk}")
                         yield chunk
 
         except Exception as e:

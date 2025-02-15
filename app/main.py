@@ -21,12 +21,11 @@ logger.add(
 )
 
 
+from app.deepclaude.auth import verify_api_key  # noqa: E402
+from app.deepclaude.deepclaude import DeepClaude  # noqa: E402
 from fastapi import Depends, FastAPI, HTTPException, Request  # noqa: E402
 from fastapi.middleware.cors import CORSMiddleware  # noqa: E402
 from fastapi.responses import StreamingResponse  # noqa: E402
-
-from app.deepclaude.auth import verify_api_key  # noqa: E402
-from app.deepclaude.deepclaude import DeepClaude  # noqa: E402
 
 app = FastAPI(title="DeepClaude API")
 
@@ -159,8 +158,9 @@ async def chat_completions(request: Request):
     try:
         # 1. 获取基础信息
         body = await request.json()
-        logger.debug(f"请求体: {body}")
+        logger.debug(f"请求体: {body}，请求头: {request.headers}")
         messages = body.get("messages")
+        tools = body.get("tools", [])
 
         # 2. 获取并验证参数
         model_arg = get_and_validate_params(body)
@@ -173,6 +173,7 @@ async def chat_completions(request: Request):
             return StreamingResponse(
                 deep_claude.chat_completions_with_stream(
                     messages=messages,
+                    tools=tools,
                     model_arg=model_arg,
                     reasoning_model=model_arg["reasoning_model"],
                     answering_model=model_arg["answering_model"],
