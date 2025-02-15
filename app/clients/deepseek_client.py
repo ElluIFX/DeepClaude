@@ -1,9 +1,10 @@
 """DeepSeek API 客户端"""
 
 import json
+import os
 from typing import AsyncGenerator
 
-from app.utils.logger import logger
+from loguru import logger
 
 from .base_client import BaseClient
 
@@ -50,15 +51,16 @@ class DeepSeekClient(BaseClient):
     async def stream_chat(
         self,
         messages: list,
+        model_arg: dict,
         model: str = "deepseek-ai/DeepSeek-R1",
-        is_origin_reasoning: bool = True,
-        reasoning_effort: str = "medium",
     ) -> AsyncGenerator[tuple[str, str], None]:
         """流式对话
 
         Args:
             messages: 消息列表
             model: 模型名称
+            model_arg: 模型参数
+
 
         Yields:
             tuple[str, str]: (内容类型, 内容)
@@ -74,7 +76,11 @@ class DeepSeekClient(BaseClient):
             "model": model,
             "messages": messages,
             "stream": True,
-            "reasoning_effort": reasoning_effort,
+            "reasoning_effort": model_arg["reasoning_effort"],
+            "temperature": model_arg["temperature"],
+            "top_p": model_arg["top_p"],
+            "presence_penalty": model_arg["presence_penalty"],
+            "frequency_penalty": model_arg["frequency_penalty"],
         }
 
         logger.debug(f"开始流式对话：{data}")
@@ -99,18 +105,18 @@ class DeepSeekClient(BaseClient):
                     if data and data.get("choices") and data["choices"][0].get("delta"):
                         delta = data["choices"][0]["delta"]
 
-                        if is_origin_reasoning:
+                        if os.getenv("IS_ORIGIN_REASONING", "True").lower() == "true":
                             # 处理 reasoning_content
                             if delta.get("reasoning_content"):
                                 content = delta["reasoning_content"]
-                                # logger.debug(f"提取推理内容：{content}")
+                                logger.debug(f"提取推理内容：{content}")
                                 yield "reasoning", content
 
                             if delta.get("reasoning_content") is None and delta.get(
                                 "content"
                             ):
                                 content = delta["content"]
-                                # logger.info(f"提取内容信息，推理阶段结束: {content}")
+                                logger.info(f"提取内容信息，推理阶段结束: {content}")
                                 yield "content", content
                         else:
                             # 处理其他模型的输出
@@ -118,7 +124,7 @@ class DeepSeekClient(BaseClient):
                                 content = delta["content"]
                                 if content == "":  # 只跳过完全空的字符串
                                     continue
-                                # logger.debug(f"非原生推理内容：{content}")
+                                logger.debug(f"非原生推理内容：{content}")
                                 accumulated_content += content
 
                                 # 检查累积的内容是否包含完整的 think 标签对
@@ -143,7 +149,6 @@ class DeepSeekClient(BaseClient):
                                             "reasoning",
                                             content.replace("</think>", ""),
                                         )
-                                        # 输出空的 content 来触发 Claude 处理
                                         yield "content", ""
                                         # 重置累积内容
                                         accumulated_content = ""

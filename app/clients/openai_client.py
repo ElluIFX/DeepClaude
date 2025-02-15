@@ -3,7 +3,7 @@
 import json
 from typing import AsyncGenerator
 
-from app.utils.logger import logger
+from loguru import logger
 
 from .base_client import BaseClient
 
@@ -13,7 +13,7 @@ class OpenAIClient(BaseClient):
         self,
         api_key: str,
         api_url: str = "https://api.openai.com/v1/chat/completions",
-        provider: str = "OpenAI"
+        provider: str = "OpenAI",
     ):
         """Initialize OpenAI client
 
@@ -29,7 +29,6 @@ class OpenAIClient(BaseClient):
         messages: list,
         model_arg: dict,
         model: str = "gpt-3.5-turbo",
-        stream: bool = True,
     ) -> AsyncGenerator[tuple[str, str], None]:
         """Stream chat with OpenAI API
 
@@ -52,7 +51,7 @@ class OpenAIClient(BaseClient):
         data = {
             "model": model,
             "messages": messages,
-            "stream": stream,
+            "stream": True,
             "temperature": 1
             if model_arg["temperature"] < 0 or model_arg["temperature"] > 1
             else model_arg["temperature"],
@@ -63,40 +62,25 @@ class OpenAIClient(BaseClient):
 
         logger.debug(f"Starting chat: {data}")
 
-        if stream:
-            async for chunk in self._make_request(headers, data):
-                chunk_str = chunk.decode("utf-8")
-                if not chunk_str.strip():
-                    continue
+        async for chunk in self._make_request(headers, data):
+            chunk_str = chunk.decode("utf-8")
+            if not chunk_str.strip():
+                continue
 
-                for line in chunk_str.split("\n"):
-                    if line.startswith("data: "):
-                        json_str = line[6:]  # Remove 'data: ' prefix
-                        if json_str.strip() == "[DONE]":
-                            return
+            for line in chunk_str.split("\n"):
+                if line.startswith("data: "):
+                    json_str = line[6:]  # Remove 'data: ' prefix
+                    if json_str.strip() == "[DONE]":
+                        return
 
-                        try:
-                            data = json.loads(json_str)
-                            content = (
-                                data.get("choices", [{}])[0]
-                                .get("delta", {})
-                                .get("content", "")
-                            )
-                            if content:
-                                yield "answer", content
-                        except json.JSONDecodeError:
-                            continue
-        else:
-            # Non-streaming output
-            async for chunk in self._make_request(headers, data):
-                try:
-                    response = json.loads(chunk.decode("utf-8"))
-                    content = (
-                        response.get("choices", [{}])[0]
-                        .get("message", {})
-                        .get("content", "")
-                    )
-                    if content:
-                        yield "answer", content
-                except json.JSONDecodeError:
-                    continue
+                    try:
+                        data = json.loads(json_str)
+                        content = (
+                            data.get("choices", [{}])[0]
+                            .get("delta", {})
+                            .get("content", "")
+                        )
+                        if content:
+                            yield "answer", content
+                    except json.JSONDecodeError:
+                        continue

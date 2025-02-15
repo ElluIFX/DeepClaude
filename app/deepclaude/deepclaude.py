@@ -2,20 +2,18 @@
 
 import asyncio
 import json
+import os
 import time
 from copy import deepcopy
 from typing import AsyncGenerator
 
 import aiohttp
+from loguru import logger
 
-from app.clients import (
-    ClaudeClient,
-    DeepSeekClient,
-    OpenAIClient,
-)
-from app.utils.logger import logger
+from app.clients import DeepSeekClient, OpenAIClient
 
-WEB_SEARCH_CHECK_PROMPT = """You are a large-model online search assistance engine, and your task is to determine whether the user's latest news warrants a web search based on the context of the current conversation, in order to supplement the latest information that is missing from the large-model fixed knowledge base. YOU DONT NEED TO ANSWER USER's QUESTION, just judge wheather a search request should be sent and what is in it.
+WEB_SEARCH_CHECK_PROMPT = """You are a large-model online search assistance engine, and your task is to determine whether the user's latest prompt warrants a web search based on the context of the current conversation, in order to supplement the latest information that is missing from the large-model fixed knowledge base.
+- YOU DONT NEED TO ANSWER USER's QUESTION, just judge wheather a search request should be sent and what is in it.
 - If you don't think the user's latest command requires searching online content, just output "NO".
 - - For simple question that existing in your database, like programing/role play/daily talk/common knowledge, just output "NO" for saving credits.
 - And if you think the user's latest command really requires searching online content, analyze the user's command and output what you think are reasonable Google search terms in the following format:
@@ -28,68 +26,43 @@ keyword1 keyword2 ... keywordB keywordB ...
 -The number of keywords per search request should be 3 to 6, and single keywords can be used for requests with strong pointers such as names of people and places.
 - - You need to determine the complexity of the search, for simple questions try to use only 1 request, while for complex questions (e.g. multi-language integrated searches, multi-subject topics, etc.) you can create 2-4 search requests, not more than 5 at most.
 - Finally, if the content of the user's command specifies that an online search is required, summarize the keywords according to the user's command even if you don't think you need to invoke a search.
-- About "latest": The latest time now is far away from year 2023, when user request latest news, just search without time, especially dont add "2023" as keyword
+- About "latest": The latest time now is far away from year 2023, when user request latest news, just search without time that based on your knowledge.
 - IMPORTANT: You can only output the keyword sequence, or "NO". You don't need to add any explanations or answer anything from the user's command, they are the tasks for another model.
 """
 
 
 class DeepClaude:
-    """处理 DeepSeek 和 Claude API 的流式输出衔接"""
-
-    def __init__(
-        self,
-        deepseek_api_key: str,
-        claude_api_key: str,
-        deepseek_api_url: str,
-        claude_api_url: str,
-        claude_provider: str,
-        is_origin_reasoning: bool,
-        web_search_token: str,
-        web_search_max_results: int,
-        web_search_crawl_results: int,
-        web_search_model: str,
-        web_search_api_key: str,
-        web_search_api_url: str,
-    ):
-        """初始化 API 客户端
-
-        Args:
-            deepseek_api_key: DeepSeek API密钥
-            claude_api_key: Claude API密钥
-            enable_web_search: 是否启用 Web 搜索
-        """
-        self.deepseek_client = DeepSeekClient(deepseek_api_key, deepseek_api_url)
-        if claude_provider in ["anthropic", "oneapi"]:
-            self.claude_client = ClaudeClient(
-                claude_api_key, claude_api_url, claude_provider
-            )
-        elif claude_provider == "openai":
-            self.claude_client = OpenAIClient(claude_api_key, claude_api_url)
-        else:
-            raise ValueError(f"不支持的 Claude Provider: {claude_provider}")
-        self.is_origin_reasoning = is_origin_reasoning
-        self.web_search_token = web_search_token
-        self.web_search_max_results = web_search_max_results
-        self.web_search_crawl_results = web_search_crawl_results
-        self.web_search_model = web_search_model
-        self.web_search_client = OpenAIClient(web_search_api_key, web_search_api_url)
+    def __init__(self):
+        """初始化 API 客户端"""
+        self.reasoning_client = DeepSeekClient(
+            os.getenv("REASONING_API_KEY"), os.getenv("REASONING_API_URL")
+        )
+        self.answering_client = OpenAIClient(
+            os.getenv("ANSWERING_API_KEY"), os.getenv("ANSWERING_API_URL")
+        )
+        self.web_search_client = OpenAIClient(
+            os.getenv("WEB_SEARCH_API_KEY"), os.getenv("WEB_SEARCH_API_URL")
+        )
+        logger.info("DeepClaude 初始化完成")
 
     async def chat_completions_with_stream(
         self,
         messages: list,
         model_arg: dict,
-        deepseek_model: str = "deepseek-reasoner",
-        claude_model: str = "claude-3-5-sonnet-20241022",
+        reasoning_model: str,
+        answering_model: str,
         enable_web_search: bool = False,
-        enable_claude: bool = True,
+        enable_answering: bool = True,
     ) -> AsyncGenerator[bytes, None]:
         """处理完整的流式输出过程
 
         Args:
             messages: 初始消息列表
             model_arg: 模型参数
-            deepseek_model: DeepSeek 模型名称
-            claude_model: Claude 模型名称
+            reasoning_model: 推理模型名称
+            answering_model: 回答模型名称
+            enable_web_search: 是否启用 Web 搜索
+            enable_answering: 是否启用二级模型回答
 
         Yields:
             字节流数据，格式如下：
@@ -114,9 +87,9 @@ class DeepClaude:
 
         # 创建队列，用于收集输出数据
         output_queue = asyncio.Queue()
-        # 队列，用于传递 DeepSeek 推理内容给 Claude
-        claude_queue = asyncio.Queue()
-        # 队列，用于传递网络搜索结果给 Claude 和 DeepSeek
+        # 队列，用于传递 DeepSeek 推理内容给二级模型
+        answering_queue = asyncio.Queue()
+        # 队列，用于传递网络搜索结果给一级模型和二级模型
         web_search_queue_1 = asyncio.Queue()
         web_search_queue_2 = asyncio.Queue()
 
@@ -128,7 +101,7 @@ class DeepClaude:
                 "id": chat_id,
                 "object": "chat.completion.chunk",
                 "created": created_time,
-                "model": deepseek_model,
+                "model": reasoning_model,
                 "choices": [
                     {
                         "index": 0,
@@ -154,13 +127,13 @@ class DeepClaude:
             ]
             web_search_messages.extend(messages)
             logger.info(
-                f"开始检查是否需要进行网络搜索, 使用模型: {self.web_search_model}, 提供商: OpenAI"
+                f"开始检查是否需要进行网络搜索, 使用模型: {os.getenv('WEB_SEARCH_MODEL')}, 提供商: OpenAI"
             )
             web_search_keys = []
             ret_content = ""
             async for content_type, content in self.web_search_client.stream_chat(
                 messages=web_search_messages,
-                model=self.web_search_model,
+                model=os.getenv("WEB_SEARCH_MODEL"),
                 model_arg={
                     "max_tokens": 1000,
                     "temperature": 0.3,
@@ -171,7 +144,8 @@ class DeepClaude:
             ):
                 if content_type == "answer":
                     ret_content += content
-            web_search_keys = ret_content.strip()
+            web_search_keys = ret_content.strip().replace("\n", " ")
+            web_search_keys = " ".join(web_search_keys.split())
             logger.info(f"检查模型返回: {web_search_keys}")
 
             if web_search_keys.lower() == "no":
@@ -189,14 +163,16 @@ class DeepClaude:
                             async with session.post(
                                 url="https://api.search1api.com/search",
                                 headers={
-                                    "Authorization": f"Bearer {self.web_search_token}",
+                                    "Authorization": f"Bearer {os.getenv('WEB_SEARCH_TOKEN')}",
                                     "Content-Type": "application/json",
                                 },
                                 json={
                                     "query": search_key,
                                     "search_service": "google",
-                                    "max_results": self.web_search_max_results,
-                                    "crawl_results": self.web_search_crawl_results,
+                                    "max_results": os.getenv("WEB_SEARCH_MAX_RESULTS"),
+                                    "crawl_results": os.getenv(
+                                        "WEB_SEARCH_CRAWL_RESULTS"
+                                    ),
                                     "image": False,
                                 },
                             ) as response:
@@ -241,10 +217,10 @@ class DeepClaude:
             await web_search_queue_1.put(web_search_content)
             await web_search_queue_2.put(web_search_content)
 
-        async def process_deepseek(messages: list):
+        async def process_reasoning(messages: list):
             web_search_content = await web_search_queue_1.get()
             logger.info(
-                f"开始处理 DeepSeek 流，使用模型：{deepseek_model}, 提供商: {self.deepseek_client.provider}"
+                f"开始处理一级模型流，使用模型：{reasoning_model}, 提供商: {self.reasoning_client.provider}"
             )
 
             for message in messages:
@@ -274,30 +250,29 @@ class DeepClaude:
                     "\n\n<system>The above content are the results of online searching, both the time and content are real, which may not match your database because your database is up to an earlier time, but the current time has changed. Please think based on the search results. **Use the language of the original prompt for reasoning and answer**</system>"
                 )
             try:
-                async for content_type, content in self.deepseek_client.stream_chat(
+                async for content_type, content in self.reasoning_client.stream_chat(
                     messages,
-                    deepseek_model,
-                    self.is_origin_reasoning,
-                    model_arg["reasoning_effort"],
+                    model_arg=model_arg,
+                    model=reasoning_model,
                 ):
                     if content_type == "reasoning":
                         reasoning_content.append(content)
                         await send_reasoning_response(content)
                     elif content_type == "content":
-                        if enable_claude:
+                        if enable_answering:
                             # 当收到 content 类型时，将完整的推理内容发送到 claude_queue，并结束 DeepSeek 流处理
                             full_reasoning = "".join(reasoning_content).strip()
                             logger.info(
-                                f"DeepSeek 推理完成，收集到的推理内容长度：{len(full_reasoning)}"
+                                f"一级模型推理完成，收集到的推理内容长度：{len(full_reasoning)}"
                             )
-                            await claude_queue.put(full_reasoning)
+                            await answering_queue.put(full_reasoning)
                             break
                         else:
                             response = {
                                 "id": chat_id,
                                 "object": "chat.completion.chunk",
                                 "created": created_time,
-                                "model": deepseek_model,
+                                "model": reasoning_model,
                                 "choices": [
                                     {
                                         "index": 0,
@@ -312,17 +287,17 @@ class DeepClaude:
                                 f"data: {json.dumps(response)}\n\n".encode("utf-8")
                             )
             except Exception as e:
-                logger.error(f"处理 DeepSeek 流时发生错误: {e}")
-                await claude_queue.put("")
-            # 用 None 标记 DeepSeek 任务结束
-            logger.info("DeepSeek 任务处理完成，标记结束")
+                logger.error(f"处理一级模型流时发生错误: {e}")
+                await answering_queue.put("")
+            # 用 None 标记一级模型任务结束
+            logger.info("一级模型任务处理完成，标记结束")
             await output_queue.put(None)
 
-        async def process_claude(messages: list):
+        async def process_answering(messages: list):
             web_search_content = await web_search_queue_2.get()
             try:
-                logger.info("等待获取 DeepSeek 的推理内容...")
-                reasoning = await claude_queue.get()
+                logger.info("等待获取一级模型的推理内容...")
+                reasoning = await answering_queue.get()
                 logger.debug(
                     f"获取到推理内容，内容长度：{len(reasoning) if reasoning else 0}，内容：{reasoning}"
                 )
@@ -371,23 +346,22 @@ class DeepClaude:
                 #     for message in messages
                 #     if message.get("role", "") != "system"
                 # ]
-                # logger.debug(f"Claude 的输入消息: {messages}")
 
                 logger.info(
-                    f"开始处理 Claude 流，使用模型: {claude_model}, 提供商: {self.claude_client.provider}"
+                    f"开始处理二级模型流，使用模型: {answering_model}, 提供商: {self.answering_client.provider}"
                 )
 
-                async for content_type, content in self.claude_client.stream_chat(
+                async for content_type, content in self.answering_client.stream_chat(
                     messages=messages,
                     model_arg=model_arg,
-                    model=claude_model,
+                    model=answering_model,
                 ):
                     if content_type == "answer":
                         response = {
                             "id": chat_id,
                             "object": "chat.completion.chunk",
                             "created": created_time,
-                            "model": claude_model,
+                            "model": answering_model,
                             "choices": [
                                 {
                                     "index": 0,
@@ -399,9 +373,9 @@ class DeepClaude:
                             f"data: {json.dumps(response)}\n\n".encode("utf-8")
                         )
             except Exception as e:
-                logger.error(f"处理 Claude 流时发生错误: {e}")
-            # 用 None 标记 Claude 任务结束
-            logger.info("Claude 任务处理完成，标记结束")
+                logger.error(f"处理二级模型流时发生错误: {e}")
+            # 用 None 标记二级模型任务结束
+            logger.info("二级模型任务处理完成，标记结束")
             await output_queue.put(None)
 
         # 创建并发任务
@@ -412,15 +386,15 @@ class DeepClaude:
             await web_search_queue_1.put([])
             await web_search_queue_2.put([])
 
-        deepseek_messages = deepcopy(messages)
-        claude_messages = deepcopy(messages)
-        asyncio.create_task(process_deepseek(deepseek_messages))
-        if enable_claude:
-            asyncio.create_task(process_claude(claude_messages))
+        reasoning_messages = deepcopy(messages)
+        answering_messages = deepcopy(messages)
+        asyncio.create_task(process_reasoning(reasoning_messages))
+        if enable_answering:
+            asyncio.create_task(process_answering(answering_messages))
 
         # 等待任务完成，通过计数判断
         finished_tasks = 0
-        while finished_tasks < (2 if enable_claude else 1):
+        while finished_tasks < (2 if enable_answering else 1):
             item = await output_queue.get()
             if item is None:
                 finished_tasks += 1
