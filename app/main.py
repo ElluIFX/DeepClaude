@@ -13,22 +13,29 @@ load_dotenv(override=True)  # 添加override=True强制覆盖已存在的环境�
 
 logger.remove()
 if os.environ.get("NO_STDERR").lower() != "true":
-    logger.add(sys.stderr, level=os.getenv("LOG_LEVEL"))
+    logger.add(sys.stderr, level="INFO")
 
 logger.add(
     os.getcwd() + "/logs/{time:YYYY-MM-DD}.log",
-    level=os.getenv("LOG_LEVEL"),
+    level="INFO",
     rotation="1 day",
     retention=10,
 )
 
+if os.environ.get("NO_DEBUG_LOG").lower() != "true":
+    logger.add(
+        os.getcwd() + "/logs/{time:YYYY-MM-DD}.debug.log",
+        rotation="1 day",
+        retention=10,
+        filter=lambda record: record["level"].name == "DEBUG",
+    )
 
-from fastapi import Depends, FastAPI, HTTPException, Request  # noqa: E402
-from fastapi.middleware.cors import CORSMiddleware  # noqa: E402
-from fastapi.responses import StreamingResponse  # noqa: E402
 
 from app.deepclaude.auth import verify_api_key  # noqa: E402
 from app.deepclaude.deepclaude import DeepClaude  # noqa: E402
+from fastapi import Depends, FastAPI, HTTPException, Request  # noqa: E402
+from fastapi.middleware.cors import CORSMiddleware  # noqa: E402
+from fastapi.responses import StreamingResponse  # noqa: E402
 
 app = FastAPI(title="DeepClaude API")
 
@@ -47,10 +54,6 @@ app.add_middleware(
 )
 
 deep_claude = DeepClaude()
-
-# 验证日志级别
-logger.debug(f"当前日志级别为 {os.getenv('LOG_LEVEL')}")
-logger.info("开始请求")
 
 
 @app.get("/", dependencies=[Depends(verify_api_key)])

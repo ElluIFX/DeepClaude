@@ -2,8 +2,7 @@
 
 import json
 from typing import AsyncGenerator
-
-from loguru import logger
+from venv import logger
 
 from .base_client import BaseClient
 
@@ -66,34 +65,31 @@ class OpenAIClient(BaseClient):
         if tools:
             data["tools"] = tools
 
-        logger.info("开始流式对话")
-
         async for chunk in self._make_request(headers, data):
-            chunk_str = chunk.decode("utf-8")
-            if not chunk_str.strip():
-                continue
-
-            for line in chunk_str.split("\n"):
-                if line.startswith("data: "):
-                    json_str = line[6:]  # Remove 'data: ' prefix
-                    if json_str.strip() == "[DONE]":
+            try:
+                chunk_str = chunk.decode("utf-8")
+                if not chunk_str.strip():
+                    continue
+                lines = [line.strip() for line in chunk_str.split("data: ") if line.strip()]
+                for line in lines:
+                    if line == "[DONE]":
                         return
-
                     try:
-                        data = json.loads(json_str)
-                        content = (
-                            data.get("choices", [{}])[0]
-                            .get("delta", {})
-                            .get("content", "")
-                        )
-                        tool_calls = (
-                            data.get("choices", [{}])[0]
-                            .get("delta", {})
-                            .get("tool_calls", [])
-                        )
-                        if content:
-                            yield "answer", content
-                        if tool_calls:
-                            yield "tool_calls", tool_calls
-                    except json.JSONDecodeError:
+                        data = json.loads(line)
+                    except json.JSONDecodeError as e:
+                        logger.warning(f"JSON 解析错误: {e}, 解析内容: {line}")
                         continue
+                    content = (
+                        data.get("choices", [{}])[0].get("delta", {}).get("content", "")
+                    )
+                    tool_calls = (
+                        data.get("choices", [{}])[0]
+                        .get("delta", {})
+                        .get("tool_calls", [])
+                    )
+                    if content:
+                        yield "answer", content
+                    if tool_calls:
+                        yield "tool_calls", tool_calls
+            except Exception as e:
+                logger.error(f"处理 chunk 时发生错误: {e}")

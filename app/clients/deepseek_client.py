@@ -83,25 +83,25 @@ class DeepSeekClient(BaseClient):
             "frequency_penalty": model_arg["frequency_penalty"],
         }
 
-        logger.info("开始流式对话")
-
         accumulated_content = ""
         is_collecting_think = False
 
         async for chunk in self._make_request(headers, data):
-            chunk_str = chunk.decode("utf-8")
-
             try:
-                lines = chunk_str.splitlines()
+                chunk_str = chunk.decode("utf-8")
+                if not chunk_str.strip():
+                    continue
+                lines = [
+                    line.strip() for line in chunk_str.split("data: ") if line.strip()
+                ]
                 for line in lines:
-                    if not line.startswith("data: "):
-                        continue
-                    json_str = line.strip()[len("data: ") :]
-                    if not json_str:
-                        continue
-                    if json_str == "[DONE]":
+                    if line == "[DONE]":
                         return
-                    data = json.loads(json_str)
+                    try:
+                        data = json.loads(line)
+                    except json.JSONDecodeError as e:
+                        logger.warning(f"JSON 解析错误: {e}，解析内容：{line}")
+                        continue
                     if data and data.get("choices") and data["choices"][0].get("delta"):
                         delta = data["choices"][0]["delta"]
 
@@ -158,8 +158,5 @@ class DeepSeekClient(BaseClient):
                                 else:
                                     # 普通内容
                                     yield "content", content
-
-            except json.JSONDecodeError as e:
-                logger.error(f"JSON 解析错误: {e}")
             except Exception as e:
                 logger.error(f"处理 chunk 时发生错误: {e}")

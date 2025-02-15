@@ -8,10 +8,9 @@ from copy import deepcopy
 from typing import AsyncGenerator
 
 import aiohttp
+from app.clients import DeepSeekClient, OpenAIClient
 from fastapi import HTTPException
 from loguru import logger
-
-from app.clients import DeepSeekClient, OpenAIClient
 
 WEB_SEARCH_CHECK_PROMPT = """You are a large-model online search assistance engine, and your task is to determine whether the user's latest prompt warrants a web search based on the context of the current conversation, in order to supplement the latest information that is missing from the large-model fixed knowledge base.
 - YOU DONT NEED TO ANSWER USER's QUESTION, just judge wheather a search request should be sent and what is in it.
@@ -183,6 +182,8 @@ class DeepClaude:
         # 用于存储 DeepSeek 的推理累积内容
         reasoning_content = []
 
+        logger.info(f"[{chat_id}] 对话请求接受，开始处理")
+
         async def send_reasoning_response(reasoning_content: str):
             response = {
                 "id": chat_id,
@@ -214,7 +215,7 @@ class DeepClaude:
             ]
             web_search_messages.extend(messages)
             logger.info(
-                f"开始检查是否需要进行网络搜索, 使用模型: {os.getenv('WEB_SEARCH_MODEL')}, 提供商: OpenAI"
+                f"[{chat_id}] 开始检查是否需要进行网络搜索, 使用模型: {os.getenv('WEB_SEARCH_MODEL')}, 提供商: OpenAI"
             )
             web_search_keys = []
             ret_content = ""
@@ -233,10 +234,10 @@ class DeepClaude:
                     ret_content += content
             web_search_keys = ret_content.strip().replace("\n", " ")
             web_search_keys = " ".join(web_search_keys.split())
-            logger.info(f"检查模型返回: {web_search_keys}")
+            logger.info(f"[{chat_id}] 检查模型返回: {web_search_keys}")
 
             if web_search_keys.lower() == "no":
-                logger.info("不需要进行网络搜索")
+                logger.info(f"[{chat_id}] 不需要进行网络搜索")
             else:
                 await send_reasoning_response("**Web Searching...**\n\n")
                 web_search_keys = web_search_keys.split(";")
@@ -248,7 +249,7 @@ class DeepClaude:
                     f"\n\n**Finished {len(web_search_content)} searches**\n\n---\n\n"
                 )
 
-            logger.info("网络搜索任务处理完成")
+            logger.info(f"[{chat_id}] 网络搜索任务处理完成")
             await web_search_queue_1.put(web_search_content)
             await web_search_queue_2.put(web_search_content)
             await output_queue.put(None)  # 标记网络搜索任务结束
@@ -290,7 +291,7 @@ class DeepClaude:
                     ) + build_web_search_prompt(web_search_content)
 
             logger.info(
-                f"开始处理推理模型流，使用模型：{reasoning_model}, 提供商: {self.reasoning_client.provider}"
+                f"[{chat_id}] 开始处理推理模型流，使用模型：{reasoning_model}, 提供商: {self.reasoning_client.provider}"
             )
             try:
                 async for content_type, content in self.reasoning_client.stream_chat(
@@ -305,8 +306,9 @@ class DeepClaude:
                         if enable_answering:
                             full_reasoning = "".join(reasoning_content).strip()
                             logger.info(
-                                f"推理模型推理完成，收集到的推理内容长度：{len(full_reasoning)}，内容：{full_reasoning}"
+                                f"[{chat_id}] 推理模型推理完成，收集到的推理内容长度：{len(full_reasoning)}"
                             )
+                            logger.debug(f"[{chat_id}] 推理内容：{full_reasoning}")
                             await reasoning_queue.put(full_reasoning)
                             break
                         else:
@@ -329,12 +331,12 @@ class DeepClaude:
                                 f"data: {json.dumps(response)}\n\n".encode("utf-8")
                             )
             except Exception as e:
-                logger.error(f"处理推理模型流时发生错误: {e}")
+                logger.error(f"[{chat_id}] 处理推理模型流时发生错误: {e}")
                 await reasoning_queue.put("")
                 raise HTTPException(
                     status_code=500, detail=f"处理推理模型流时发生错误: {e}"
                 )
-            logger.info("推理模型任务处理完成")
+            logger.info(f"[{chat_id}] 推理模型任务处理完成")
             await output_queue.put(None)  # 用 None 标记推理模型任务结束
 
         async def process_answering(messages: list):
@@ -355,7 +357,7 @@ class DeepClaude:
                         )
 
                 logger.info(
-                    f"开始处理回答模型流，使用模型: {answering_model}, 提供商: {self.answering_client.provider}"
+                    f"[{chat_id}] 开始处理回答模型流，使用模型: {answering_model}, 提供商: {self.answering_client.provider}"
                 )
 
                 async for content_type, content in self.answering_client.stream_chat(
@@ -400,11 +402,11 @@ class DeepClaude:
                     )
 
             except Exception as e:
-                logger.error(f"处理回答模型流时发生错误: {e}")
+                logger.error(f"[{chat_id}] 处理回答模型流时发生错误: {e}")
                 raise HTTPException(
                     status_code=500, detail=f"处理回答模型流时发生错误: {e}"
                 )
-            logger.info("回答模型任务处理完成")
+            logger.info(f"[{chat_id}] 回答模型任务处理完成")
             await output_queue.put(None)  # 标记回答模型任务结束
 
         # 创建并发任务
@@ -434,6 +436,6 @@ class DeepClaude:
             else:
                 yield item
 
-        logger.info("所有任务处理完成")
+        logger.info(f"[{chat_id}] 对话请求处理完成")
         # 发送结束标记
         yield b"data: [DONE]\n\n"
