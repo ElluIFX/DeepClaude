@@ -31,7 +31,7 @@ keyword1 keyword2 ... keywordB keywordB ...
 - IMPORTANT: You can only output the keyword sequence, or "NO". You don't need to add any explanations or answer anything from the user's command, they are the tasks for another model.
 """
 
-DEEPSEEK_SYSTEM_PROMPT = """\n\n<system_notice>你是一个大模型前置思考辅助引擎，负责对用户的问题进行深入、具体、全面的思考，为后续其他大模型的最终回答提供思路和判断依据，你不需要回答用户的问题，只需要对用户的每个最新问题进行思考，最终回答的任务交由其他大模型负责。</system_notice>
+DEEPSEEK_REASONING_PROMPT = """\n\n<system_notice>你是一个大模型前置思考辅助引擎，负责对用户的问题进行深入、具体、全面的思考，为后续其他大模型的最终回答提供思路和判断依据，你不需要回答用户的问题，只需要对用户的每个最新问题进行思考，最终回答的任务交由其他大模型负责。</system_notice>
 """
 
 IMAGE_NOTICE_PROMPT = """\n\n<system_notice>The message below contains images, which have been hidden by the system because the MODEL cannot process images. You only need to assume that the images exist and think about the user's question in the language used by the user</system_notice>\n\n"""
@@ -44,7 +44,7 @@ def build_original_prompt(message: str):
 
 
 def build_web_search_prompt(contents: str):
-    c = '<web_search_results description="The jsons below are the results returned by web searching tools, both the time and content are real, which may not match your database because your database is up to an earlier time, but the current time has changed. Please think based on the search results. **Use the language of the original prompt for reasoning and answer**">\n'
+    c = '<web_search_results description="The jsons below are the results returned by web searching tools, both the time and content are real, which may not match your database because your database is up to an earlier time, but the current time has changed. Please think based on the search results. When you are using the content from searching, cite the original source url using the following format: [[CITE_NO]](SOURCE_URL) like this: [[1]](https://www.google.com). **Use the language of the original prompt for reasoning and answer**">\n'
     for i, content in enumerate(contents):
         c += f"<result id={i}>\n{content}\n</result>\n"
     c += "</web_search_results>\n\n"
@@ -254,13 +254,9 @@ class DeepClaude:
             await output_queue.put(None)  # 标记网络搜索任务结束
 
         async def process_reasoning(messages: list):
-            web_search_content = await web_search_queue_1.get()
-            logger.info(
-                f"开始处理推理模型流，使用模型：{reasoning_model}, 提供商: {self.reasoning_client.provider}"
-            )
-            new_messages = [
-                build_system_message(DEEPSEEK_SYSTEM_PROMPT),
-            ]
+            new_messages = []
+            if enable_answering:
+                new_messages.append(build_system_message(DEEPSEEK_REASONING_PROMPT))
             for message in messages:
                 if "image_url" in str(message.get("content", "")):
                     content = message["content"]
@@ -286,10 +282,16 @@ class DeepClaude:
 
             messages = new_messages
 
-            if web_search_content:
-                messages[-1]["content"] = build_original_prompt(
-                    messages[-1]["content"]
-                ) + build_web_search_prompt(web_search_content)
+            if enable_web_search:
+                web_search_content = await web_search_queue_1.get()
+                if web_search_content:
+                    messages[-1]["content"] = build_original_prompt(
+                        messages[-1]["content"]
+                    ) + build_web_search_prompt(web_search_content)
+
+            logger.info(
+                f"开始处理推理模型流，使用模型：{reasoning_model}, 提供商: {self.reasoning_client.provider}"
+            )
             try:
                 async for content_type, content in self.reasoning_client.stream_chat(
                     messages,
@@ -301,10 +303,9 @@ class DeepClaude:
                         await send_reasoning_response(content)
                     elif content_type == "content":
                         if enable_answering:
-                            # 当收到 content 类型时，将完整的推理内容发送到 claude_queue，并结束 DeepSeek 流处理
                             full_reasoning = "".join(reasoning_content).strip()
                             logger.info(
-                                f"推理模型推理完成，收集到的推理内容长度：{len(full_reasoning)}"
+                                f"推理模型推理完成，收集到的推理内容长度：{len(full_reasoning)}，内容：{full_reasoning}"
                             )
                             await reasoning_queue.put(full_reasoning)
                             break
@@ -337,67 +338,21 @@ class DeepClaude:
             await output_queue.put(None)  # 用 None 标记推理模型任务结束
 
         async def process_answering(messages: list):
-            web_search_content = await web_search_queue_2.get()
             try:
-                logger.info("等待获取推理模型的推理内容...")
-                reasoning = await reasoning_queue.get()
-                logger.debug(
-                    f"获取到推理内容，内容长度：{len(reasoning) if reasoning else 0}，内容：{reasoning}"
-                )
-                # 构造 Claude 的输入消息
-                # last_message = {}
-                # for message in messages[::-1]:
-                #     if message.get("role", "") == "user":
-                #         last_message = message
-                #         break
-                # last_message_text = ""
-                # last_message_item = None
-                # if isinstance(last_message["content"], list):
-                #     for item in last_message["content"]:
-                #         if item.get("type", "") == "text":
-                #             last_message_text = item["text"]
-                #             last_message_item = item
-                #             break
-
-                #     def set_last_message_text(text):
-                #         last_message_item["text"] = text
-                # else:
-                #     last_message_text = last_message["content"]
-
-                #     def set_last_message_text(text):
-                #         last_message["content"] = text
-
-                if web_search_content:
-                    #     last_message_text = build_original_prompt(
-                    #         last_message_text
-                    #     ) + build_web_search_result(web_search_content)
-                    messages.append(
-                        build_system_message(
-                            build_web_search_prompt(web_search_content)
+                if enable_web_search:
+                    web_search_content = await web_search_queue_2.get()
+                    if web_search_content:
+                        messages.append(
+                            build_system_message(
+                                build_web_search_prompt(web_search_content)
+                            )
                         )
-                    )
-
-                if not reasoning:
-                    logger.info("推理内容为空，将使用默认提示继续")
-                else:
-                    # if "<original_prompt>" in last_message_text:
-                    #     last_message_text += build_reasoning_assistant(reasoning)
-                    # else:
-                    #     last_message_text = build_original_prompt(
-                    #         last_message_text
-                    #     ) + build_reasoning_assistant(reasoning)
-                    messages.append(
-                        build_system_message(build_reasoning_prompt(reasoning))
-                    )
-
-                # set_last_message_text(last_message_text)
-
-                # # 处理可能 messages 内存在 role = system 的情况，如果有，则去掉当前这一条的消息对象
-                # messages = [
-                #     message
-                #     for message in messages
-                #     if message.get("role", "") != "system"
-                # ]
+                if enable_reasoning:
+                    reasoning = await reasoning_queue.get()
+                    if reasoning:
+                        messages.append(
+                            build_system_message(build_reasoning_prompt(reasoning))
+                        )
 
                 logger.info(
                     f"开始处理回答模型流，使用模型: {answering_model}, 提供商: {self.answering_client.provider}"
