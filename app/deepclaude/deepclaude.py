@@ -8,9 +8,10 @@ from copy import deepcopy
 from typing import AsyncGenerator
 
 import aiohttp
-from app.clients import DeepSeekClient, OpenAIClient
 from fastapi import HTTPException
 from loguru import logger
+
+from app.clients import DeepSeekClient, OpenAIClient
 
 WEB_SEARCH_CHECK_PROMPT = """You are a large-model online search assistance engine, and your task is to determine whether the user's latest prompt warrants a web search based on the context of the current conversation, in order to supplement the latest information that is missing from the large-model fixed knowledge base.
 - YOU DONT NEED TO ANSWER USER's QUESTION, just judge wheather a search request should be sent and what is in it.
@@ -28,6 +29,9 @@ keyword1 keyword2 ... keywordB keywordB ...
 - Finally, if the content of the user's command specifies that an online search is required, summarize the keywords according to the user's command even if you don't think you need to invoke a search.
 - About "latest": The latest time now is far away from year 2023, when user request latest news, just search without time that based on your knowledge.
 - IMPORTANT: You can only output the keyword sequence, or "NO". You don't need to add any explanations or answer anything from the user's command, they are the tasks for another model.
+"""
+
+DEEPSEEK_SYSTEM_PROMPT = """\n\n<system_notice>你是一个大模型前置思考辅助引擎，负责对用户的问题进行深入、具体、全面的思考，为后续其他大模型的最终回答提供思路和判断依据，你不需要回答用户的问题，只需要对用户的每个最新问题进行思考，最终回答的任务交由其他大模型负责。</system_notice>
 """
 
 IMAGE_NOTICE_PROMPT = """\n\n<system_notice>The message below contains images, which have been hidden by the system because the MODEL cannot process images. You only need to assume that the images exist and think about the user's question in the language used by the user</system_notice>\n\n"""
@@ -53,6 +57,60 @@ def build_reasoning_prompt(reasoning: str):
 
 def build_system_message(message: str):
     return {"role": "system", "content": message}
+
+
+async def web_search(search_keys, max_concurrent_searches: int = 8):
+    async def perform_search(search_key):
+        try:
+            logger.info(f"发起网络搜索，关键词: {search_key}")
+            async with aiohttp.ClientSession() as session:
+                async with session.post(
+                    url="https://api.search1api.com/search",
+                    headers={
+                        "Authorization": f"Bearer {os.getenv('WEB_SEARCH_TOKEN')}",
+                        "Content-Type": "application/json",
+                    },
+                    json={
+                        "query": search_key,
+                        "search_service": os.getenv("WEB_SEARCH_SERVICE"),
+                        "max_results": os.getenv("WEB_SEARCH_MAX_RESULTS"),
+                        "crawl_results": os.getenv("WEB_SEARCH_CRAWL_RESULTS"),
+                        "image": False,
+                    },
+                ) as response:
+                    result = await response.text()
+                    logger.debug(
+                        f"网络搜索 {search_key} 返回值: {result}，状态码: {response.status}"
+                    )
+                    if response.status != 200:
+                        logger.error(
+                            f"网络搜索 {search_key} 失败，状态码: {response.status}"
+                        )
+                        return None
+                    else:
+                        logger.info(
+                            f"网络搜索 {search_key} 完成，返回长度: {len(result)}"
+                        )
+                        return result
+        except Exception as e:
+            logger.error(f"网络搜索 {search_key} 失败: {e}")
+            return None
+
+    # 使用 asyncio.Semaphore 限制并发数
+    semaphore = asyncio.Semaphore(max_concurrent_searches)
+
+    async def bounded_search(search_key):
+        async with semaphore:
+            return await perform_search(search_key)
+
+    # 并发执行所有搜索
+    search_tasks = [bounded_search(key.strip()) for key in search_keys]
+    search_results = await asyncio.gather(*search_tasks)
+    search_results = [r for r in search_results if r is not None]
+    logger.info(
+        f"网络搜索聚合完成，有效结果数量: {len(search_results)}, 内容长度: {sum([len(r) for r in search_results])}"
+    )
+    return search_results
 
 
 class DeepClaude:
@@ -182,63 +240,10 @@ class DeepClaude:
             else:
                 await send_reasoning_response("**Web Searching...**\n\n")
                 web_search_keys = web_search_keys.split(";")
-                MAX_CONCURRENT_SEARCHES = 8
-
-                async def perform_search(search_key):
-                    try:
-                        logger.info(f"发起网络搜索，关键词: {search_key}")
-                        await send_reasoning_response(f"- {search_key}\n")
-                        async with aiohttp.ClientSession() as session:
-                            async with session.post(
-                                url="https://api.search1api.com/search",
-                                headers={
-                                    "Authorization": f"Bearer {os.getenv('WEB_SEARCH_TOKEN')}",
-                                    "Content-Type": "application/json",
-                                },
-                                json={
-                                    "query": search_key,
-                                    "search_service": "google",
-                                    "max_results": os.getenv("WEB_SEARCH_MAX_RESULTS"),
-                                    "crawl_results": os.getenv(
-                                        "WEB_SEARCH_CRAWL_RESULTS"
-                                    ),
-                                    "image": False,
-                                },
-                            ) as response:
-                                result = await response.text()
-                                logger.debug(
-                                    f"网络搜索 返回值: {result}，状态码: {response.status}"
-                                )
-                                if response.status != 200:
-                                    logger.error(
-                                        f"网络搜索失败，状态码: {response.status}"
-                                    )
-                                    return None
-                                else:
-                                    logger.info(
-                                        f"网络搜索完成，返回长度: {len(result)}"
-                                    )
-                                    return result
-                    except Exception as e:
-                        logger.error(f"网络搜索失败: {e}")
-                        return None
-
-                # 使用 asyncio.Semaphore 限制并发数
-                semaphore = asyncio.Semaphore(MAX_CONCURRENT_SEARCHES)
-
-                async def bounded_search(search_key):
-                    async with semaphore:
-                        return await perform_search(search_key)
-
-                # 并发执行所有搜索
-                search_tasks = [bounded_search(key.strip()) for key in web_search_keys]
-                search_results = await asyncio.gather(*search_tasks)
-
-                # 过滤掉 None 结果并添加到 web_search_content
-                web_search_content.extend([r for r in search_results if r is not None])
-                logger.info(
-                    f"网络搜索聚合完成，总长度: {sum([len(r) for r in web_search_content])}"
-                )
+                for key in web_search_keys:
+                    await send_reasoning_response(f"- {key}\n")
+                search_results = await web_search(web_search_keys)
+                web_search_content.extend(search_results)
                 await send_reasoning_response(
                     f"\n\n**Finished {len(web_search_content)} searches**\n\n---\n\n"
                 )
@@ -253,7 +258,9 @@ class DeepClaude:
             logger.info(
                 f"开始处理推理模型流，使用模型：{reasoning_model}, 提供商: {self.reasoning_client.provider}"
             )
-            new_messages = []
+            new_messages = [
+                build_system_message(DEEPSEEK_SYSTEM_PROMPT),
+            ]
             for message in messages:
                 if "image_url" in str(message.get("content", "")):
                     content = message["content"]

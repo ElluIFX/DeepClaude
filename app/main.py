@@ -23,11 +23,12 @@ logger.add(
 )
 
 
-from app.deepclaude.auth import verify_api_key  # noqa: E402
-from app.deepclaude.deepclaude import DeepClaude  # noqa: E402
 from fastapi import Depends, FastAPI, HTTPException, Request  # noqa: E402
 from fastapi.middleware.cors import CORSMiddleware  # noqa: E402
 from fastapi.responses import StreamingResponse  # noqa: E402
+
+from app.deepclaude.auth import verify_api_key  # noqa: E402
+from app.deepclaude.deepclaude import DeepClaude  # noqa: E402
 
 app = FastAPI(title="DeepClaude API")
 
@@ -198,21 +199,25 @@ def get_and_validate_params(body):
         "deepseek-net": True,
     }.get(model, False)
 
-    if model.endswith("-deepnet"):
-        model = model.removesuffix("-deepnet")
-        enable_reasoning = True
-        enable_answering = True
-        enable_web_search = True
-    elif model.endswith("-deep"):
-        model = model.removesuffix("-deep")
-        enable_reasoning = True
-        enable_answering = True
-        enable_web_search = False
-    elif model.endswith("-net"):
-        model = model.removesuffix("-net")
-        enable_reasoning = False
-        enable_answering = True
-        enable_web_search = True
+    if model not in ["deepclaude", "deepclaude-net", "deepseek-net"]:
+        if model.endswith("-deepnet"):
+            model = model.removesuffix("-deepnet")
+            enable_reasoning = True
+            enable_answering = True
+            enable_web_search = True
+        elif model.endswith("-deep"):
+            model = model.removesuffix("-deep")
+            enable_reasoning = True
+            enable_answering = True
+            enable_web_search = False
+        elif model.endswith("-net"):
+            model = model.removesuffix("-net")
+            enable_reasoning = False
+            enable_answering = True
+            enable_web_search = True
+
+    if not any([enable_reasoning, enable_answering, enable_web_search]):
+        raise HTTPException(status_code=400, detail="Invalid model name")
 
     reasoning_model = os.getenv("REASONING_MODEL")
     answering_model = (
