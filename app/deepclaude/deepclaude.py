@@ -1,9 +1,11 @@
 """DeepClaude 服务，用于协调 DeepSeek 和 Claude API 的调用"""
 
 import asyncio
+import datetime
 import json
 import os
 import time
+import uuid
 from copy import deepcopy
 from typing import AsyncGenerator
 
@@ -12,23 +14,34 @@ from app.clients import DeepSeekClient, OpenAIClient
 from fastapi import HTTPException
 from loguru import logger
 
-WEB_SEARCH_CHECK_PROMPT = """You are a large-model online search assistance engine, and your task is to determine whether the user's latest prompt warrants a web search based on the context of the current conversation, in order to supplement the latest information that is missing from the large-model fixed knowledge base.
+WEB_SEARCH_CHECK_PROMPT = """You are a LLM online search assistance engine, and your task is to determine whether the user's latest prompt warrants a web search based on the context of the current conversation, in order to supplement the latest information that is missing from the LLM trained knowledge base. You should answer referring to the following rules:
 - YOU DONT NEED TO ANSWER USER's QUESTION, just judge wheather a search request should be sent and what is in it.
 - If you don't think the user's latest command requires searching online content, just output "NO".
-- - For simple question that existing in your database, like programing/role play/daily talk/common knowledge, just output "NO" for saving credits.
+- - For simple question that existing in your database, like programing/role play/daily talk/common knowledge etc., just output "NO" for saving credits.
 - And if you think the user's latest command really requires searching online content, analyze the user's command and output what you think are reasonable Google search terms in the following format:
-``
-keyword1 keyword2 ... keywordB keywordB ...
-``
+keyword1 keyword2 ...;keywordB keywordB ...
 - - Each keyword search needs to be separated by spaces, you can use Google Engine's search syntax to specify the search target more precisely (e.g. "-" excludes unwanted keywords).
 - - Multiple search requests for keywords need to be separated by a semicolon, e.g. the above example will create two search requests, respectively (search: keyword1 keyword2 ...) and (search: keywordA keywordB ...) .
-- - For single searches, it directly returns something like `keywords1 keywords2 keywords3 ...', without the semicolon. `, without the semicolon
+- - For single searches, it directly returns something like keywords1 keywords2 keywords3 ..., without the semicolon.
 -The number of keywords per search request should be 3 to 6, and single keywords can be used for requests with strong pointers such as names of people and places.
-- - You need to determine the complexity of the search, for simple questions try to use only 1 request, while for complex questions (e.g. multi-language integrated searches, multi-subject topics, etc.) you can create 2-4 search requests, not more than 5 at most.
-- Finally, if the content of the user's command specifies that an online search is required, summarize the keywords according to the user's command even if you don't think you need to invoke a search.
-- About "latest": The latest time now is far away from year 2023, when user request latest news, just search without time that based on your knowledge.
+- - You need to determine the complexity of the search, for simple questions try to use only 1 or 2 request(s) (2 is best), while for complex questions (e.g. multi-language integrated searches, multi-subject topics, etc.) you can create 3-5 search requests, not more than 4 at most.
+- Finally, if the user's command specifies that an online search is required, just do it even if you don't think it's necessary.
 - IMPORTANT: You can only output the keyword sequence, or "NO". You don't need to add any explanations or answer anything from the user's command, they are the tasks for another model.
+- About "latest": The time now is {year}-{month}-{day} {hour}:{minute}:{second} (UTC+0), if the user request latest news, just search based on this time.
 """
+
+
+def gen_web_search_check_prompt():
+    now = datetime.datetime.now(datetime.UTC)
+    return WEB_SEARCH_CHECK_PROMPT.format(
+        year=now.year,
+        month=now.month,
+        day=now.day,
+        hour=now.hour,
+        minute=now.minute,
+        second=now.second,
+    )
+
 
 DEEPSEEK_REASONING_PROMPT = """\n\n<system_notice>你是一个大模型前置思考辅助引擎，负责对用户的问题进行深入、具体、全面的思考，为后续其他大模型的最终回答提供思路和判断依据，你不需要回答用户的问题，只需要对用户的每个最新问题进行思考，最终回答的任务交由其他大模型负责。</system_notice>
 """
@@ -43,7 +56,8 @@ def build_original_prompt(message: str):
 
 
 def build_web_search_prompt(contents: str):
-    c = '<web_search_results description="The jsons below are the results returned by web searching tools, both the time and content are real, which may not match your database because your database is up to an earlier time, but the current time has changed. Please think based on the search results. When you are using the content from searching, cite the original source url using the following format: [[CITE_NO]](SOURCE_URL) like this: [[1]](https://www.google.com). **Use the language of the original prompt for reasoning and answer**">\n'
+    now = datetime.datetime.now(datetime.UTC)
+    c = f'<web_search_results description="The jsons below are the results returned by web searching tools, both the time and content are real, which may not match your database because your database is up to an earlier time, but the time now is {now.year}-{now.month}-{now.day} {now.hour}:{now.minute}:{now.second} (UTC+0). Please think based on the search results. When you are using the content from searching, cite the original source url using the following format: [[CITE_NO]](SOURCE_URL) like this: [[1]](https://www.google.com), starting from 1. **Use the language of the original prompt for reasoning and answer**">\n'
     for i, content in enumerate(contents):
         c += f"<result id={i}>\n{content}\n</result>\n"
     c += "</web_search_results>\n\n"
@@ -121,9 +135,14 @@ class DeepClaude:
         self.answering_client = OpenAIClient(
             os.getenv("ANSWERING_API_KEY"), os.getenv("ANSWERING_API_URL")
         )
-        self.web_search_client = OpenAIClient(
-            os.getenv("WEB_SEARCH_API_KEY"), os.getenv("WEB_SEARCH_API_URL")
-        )
+        if "deepseek" in os.getenv("WEB_SEARCH_MODEL"):
+            self.web_search_client = DeepSeekClient(
+                os.getenv("WEB_SEARCH_API_KEY"), os.getenv("WEB_SEARCH_API_URL")
+            )
+        else:
+            self.web_search_client = OpenAIClient(
+                os.getenv("WEB_SEARCH_API_KEY"), os.getenv("WEB_SEARCH_API_URL")
+            )
         logger.info("DeepClaude 初始化完成")
 
     async def chat_completions_with_stream(
@@ -168,7 +187,7 @@ class DeepClaude:
 
         assert enable_reasoning or enable_answering  # 总得有事干吧
         # 生成唯一的会话ID和时间戳
-        chat_id = f"chatcmpl-{hex(int(time.time() * 1000))[2:]}"
+        chat_id = f"chatcmpl-{uuid.uuid4().hex[:8]}"
         created_time = int(time.time())
 
         # 创建队列，用于收集输出数据
@@ -206,7 +225,7 @@ class DeepClaude:
         async def process_web_search(messages: list):
             web_search_content = []
             # 检查是否需要进行网络搜索
-            web_search_check_prompt = WEB_SEARCH_CHECK_PROMPT
+            web_search_check_prompt = gen_web_search_check_prompt()
             web_search_messages = [
                 {
                     "role": "system",
@@ -215,7 +234,7 @@ class DeepClaude:
             ]
             web_search_messages.extend(messages)
             logger.info(
-                f"[{chat_id}] 开始检查是否需要进行网络搜索, 使用模型: {os.getenv('WEB_SEARCH_MODEL')}, 提供商: OpenAI"
+                f"[{chat_id}] 开始检查是否需要进行网络搜索, 使用模型: {os.getenv('WEB_SEARCH_MODEL')}, 提供商: {self.web_search_client.provider}"
             )
             web_search_keys = []
             ret_content = ""
@@ -228,21 +247,22 @@ class DeepClaude:
                     "top_p": 1,
                     "frequency_penalty": 0,
                     "presence_penalty": 0,
+                    "reasoning_effort": "medium",
                 },
             ):
-                if content_type == "answer":
+                if content_type == "content":
                     ret_content += content
-            web_search_keys = ret_content.strip().replace("\n", " ")
+            web_search_keys = ret_content.strip().replace("\n", " ").replace("`", "")
             web_search_keys = " ".join(web_search_keys.split())
             logger.info(f"[{chat_id}] 检查模型返回: {web_search_keys}")
 
-            if web_search_keys.lower() == "no":
+            if web_search_keys.lower() == "no" or not web_search_keys.strip():
                 logger.info(f"[{chat_id}] 不需要进行网络搜索")
             else:
                 await send_reasoning_response("**Web Searching...**\n\n")
-                web_search_keys = web_search_keys.split(";")
+                web_search_keys = [key.strip() for key in web_search_keys.split(";")]
                 for key in web_search_keys:
-                    await send_reasoning_response(f"- {key}\n")
+                    await send_reasoning_response(f"- `{key}`\n")
                 search_results = await web_search(web_search_keys)
                 web_search_content.extend(search_results)
                 await send_reasoning_response(
@@ -299,7 +319,7 @@ class DeepClaude:
                     model_arg=model_arg,
                     model=reasoning_model,
                 ):
-                    if content_type == "reasoning":
+                    if content_type == "reasoning" and content.strip():
                         reasoning_content.append(content)
                         await send_reasoning_response(content)
                     elif content_type == "content":
@@ -366,7 +386,7 @@ class DeepClaude:
                     model=answering_model,
                     tools=tools,
                 ):
-                    if content_type == "answer":
+                    if content_type == "content":
                         response = {
                             "id": chat_id,
                             "object": "chat.completion.chunk",

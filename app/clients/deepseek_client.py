@@ -1,6 +1,5 @@
 """DeepSeek API 客户端"""
 
-import json
 import os
 from typing import AsyncGenerator
 
@@ -85,23 +84,14 @@ class DeepSeekClient(BaseClient):
 
         accumulated_content = ""
         is_collecting_think = False
+        valid_chunks = []
 
         async for chunk in self._make_request(headers, data):
             try:
                 chunk_str = chunk.decode("utf-8")
-                if not chunk_str.strip():
-                    continue
-                lines = [
-                    line.strip() for line in chunk_str.split("data: ") if line.strip()
-                ]
-                for line in lines:
-                    if line == "[DONE]":
+                for data in self._parse_chunk(chunk_str, valid_chunks):
+                    if not data:
                         return
-                    try:
-                        data = json.loads(line)
-                    except json.JSONDecodeError as e:
-                        logger.warning(f"JSON 解析错误: {e}，解析内容：{line}")
-                        continue
                     if data and data.get("choices") and data["choices"][0].get("delta"):
                         delta = data["choices"][0]["delta"]
 
